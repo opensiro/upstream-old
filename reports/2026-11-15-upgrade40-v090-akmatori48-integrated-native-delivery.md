@@ -21,9 +21,11 @@
 
 **Artifacts:**
 
-1. [Complete integrated 13-file patch](repro/2026-11-15-upgrade40-akmatori48-integrated-source.patch), SHA-256 **`12a51a94898b73f175d2ce41f71e943fa009504a6003afad002340dc62380354`**, 47,972 bytes. Applying it via `git apply` to a clean, detached exact-pin Akmatori source checkout succeeds; `git diff --check` PASS. It has native Go implementation and tests, **not merely a mocked SDK shim**.
+1. [Complete integrated 13-file patch](repro/2026-11-15-upgrade40-akmatori48-integrated-source.patch), SHA-256 **`4981ed71221fb0933063681709549f793ef9a6a2de634b78752226b4194b4dbb`**, 42,916 bytes. Applying it via `git apply --unidiff-zero` to a clean, detached exact-pin Akmatori source checkout succeeds; `git diff --check` PASS. It has native Go implementation and tests, **not merely a mocked SDK shim**.
 2. [Pinned official-provider reproduction runner](repro/2026-11-15-upgrade40-akmatori48-victorialogs-official-v154.sh), SHA-256 **`944dd94854e2e82096d27268a4079b93c393826dd223d9c507a40f006531ff2f`**. Run with `bash` and `AKMATORI_VL_BINARY` / `AKMATORI_PATCHED_REPO` set to exact local paths; no Docker required. It provisions an ephemeral loopback-only VictoriaLogs server, injects **three synthetic** journald lines, runs the source-native Go integration test, shuts down the server and removes its scratch data.
 3. [Machine-readable hashes, results and negative controls](evidence/2026-11-15-upgrade40-akmatori48-integrated-native.json), with independent patch replay, binary and runner hashes, detailed native outcome provenance, and the timing-sensitive upstream test failure noted below.
+
+**Packaging verification:** the initially published full-context patch contained original Go context indentation which `git diff --check` interpreted as whitespace defects **inside the newly added research patch file**. The file was repackaged as a **zero-context unified diff** (apply with `git apply --unidiff-zero`); its new SHA-256 is `4981ed71221fb0933063681709549f793ef9a6a2de634b78752226b4194b4dbb`. This is **only a patch-serialization change**: independent clean-source application produced **all 13 source files byte-for-byte identical** to those that passed the native Go and official-provider tests. The resulting Upstream repository diff must be rechecked after publication.
 
 ### What the patch actually integrates
 
@@ -65,7 +67,7 @@ The server was stopped and temporary storage cleaned after the test. **These are
 
 | Check | Exact result |
 | --- | --- |
-| `git apply --check` / `git diff --check` | **PASS**, exact `b2aae689…` pin |
+| `git apply --unidiff-zero --check` / `git diff --check` | **PASS**, exact `b2aae689…` pin |
 | Main application `go test ./... -count=1` | **PASS**, full module |
 | Gateway `go test -p 1 ./... -count=1` | **PASS**, full module |
 | Main and gateway `go vet ./...` | **PASS**, both complete modules |
