@@ -11,8 +11,8 @@
   "feature": "Five built-in victoria_logs LogsQL endpoints, independent victoria_metrics preservation, gateway-native tool registration and operator form schema, source-native credential authorization, bounded query/response",
   "patch": {
     "published_path": "reports/repro/2026-11-15-upgrade40-akmatori48-integrated-source.patch",
-    "sha256": "12a51a94898b73f175d2ce41f71e943fa009504a6003afad002340dc62380354",
-    "bytes": 47972,
+    "sha256": "4981ed71221fb0933063681709549f793ef9a6a2de634b78752226b4194b4dbb",
+    "bytes": 42916,
     "files": [
       "mcp-gateway/internal/tools/victorialogs/victorialogs.go",
       "mcp-gateway/internal/tools/victorialogs/victorialogs_test.go",
@@ -30,7 +30,11 @@
     ],
     "applies_to": "b2aae68949ae888a90a7436610d74b7b93507e7a",
     "git_apply_check": true,
-    "clean_git_worktree_replay": true
+    "clean_git_worktree_replay": true,
+    "git_apply_command": "git apply --unidiff-zero reports/repro/2026-11-15-upgrade40-akmatori48-integrated-source.patch (in disposable exact-pinned Akmatori checkout)",
+    "zero_context_required_for_reviewable_upstream_diff_check": true,
+    "source_files_identical_to_previously_tested_13_file_patch": true,
+    "reason_for_repackaging": "Original full-context diff introduced whitespace diagnostics in containing Upstream research PR; zero-context changes only patch format, not code, and applies successfully to exact source pin."
   },
   "official_provider": {
     "repository": "VictoriaMetrics/VictoriaLogs",
