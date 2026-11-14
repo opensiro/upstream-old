@@ -1,0 +1,842 @@
+diff --git a/docs/github.md b/docs/github.md
+index 2c20cb8..46d1b80 100644
+--- a/docs/github.md
++++ b/docs/github.md
+@@ -53,6 +53,8 @@ calls out the typed-vs-bash trade-off so the model picks correctly.
+ | `pr_create` | Opens a PR (validates title, body, base) | `/git-create-pr` |
+ | `pr_update` | Rewrites an existing PR's title + body | `/git-update-pr` |
+ | `pr_add_comment` | Posts a conversation comment on a PR | (model-callable) |
++| `issue_add_comment` | Posts a top-level comment on a GitHub Issue after validating the issue identity; refuses PR numbers | (model-callable) |
++| `issue_update` | Updates title and/or body of an existing Issue (preserves omitted fields; refuses PR numbers) | (model-callable) |
+ 
+ Every write goes through the approval modal — the modal renders the
+ full title + body before the call lands. `--yolo`
+diff --git a/internal/agent/gh_issue_mutation.go b/internal/agent/gh_issue_mutation.go
+new file mode 100644
+index 0000000..3e012b4
+--- /dev/null
++++ b/internal/agent/gh_issue_mutation.go
+@@ -0,0 +1,229 @@
++package agent
++
++import (
++	"context"
++	"encoding/json"
++	"errors"
++	"fmt"
++	"strings"
++
++	"github.com/yottadynamics/yottacode/internal/github"
++)
++
++// GHIssueAddCommentTool adds the first issue-comment mutation to the agent.
++// Tool approval is mandatory; mutation is never performed during preview.
++type GHIssueAddCommentTool struct{ GH github.Interface }
++
++func (t *GHIssueAddCommentTool) Name() string { return "issue_add_comment" }
++func (t *GHIssueAddCommentTool) Description() string {
++	return "Post one top-level GitHub issue comment, after user approval. Requires a positive issue number and a nonempty Markdown body. Never posts to a pull request."
++}
++func (t *GHIssueAddCommentTool) Schema() map[string]any {
++	return map[string]any{"type": "object", "properties": map[string]any{
++		"number": map[string]any{"type": "integer", "description": "GitHub issue number"},
++		"body":   map[string]any{"type": "string", "description": "Comment Markdown (required)"},
++	}, "required": []string{"number", "body"}}
++}
++func (t *GHIssueAddCommentTool) RequiresApproval(string) bool { return true }
++func (t *GHIssueAddCommentTool) PreviewCall(argsJSON string) string {
++	var a struct {
++		Number int    `json:"number"`
++		Body   string `json:"body"`
++	}
++	_ = json.Unmarshal([]byte(argsJSON), &a)
++	return fmt.Sprintf("issue_add_comment(number=%d)\n%s", a.Number, a.Body)
++}
++func (t *GHIssueAddCommentTool) Execute(ctx context.Context, argsJSON string) (string, error) {
++	var a struct {
++		Number int    `json:"number"`
++		Body   string `json:"body"`
++	}
++	if err := json.Unmarshal([]byte(argsJSON), &a); err != nil {
++		return "", fmt.Errorf("issue_add_comment: invalid args: %w", err)
++	}
++	if t.GH == nil {
++		return "", errors.New("issue_add_comment: GitHub adapter unavailable")
++	}
++	r, err := AddIssueComment(ctx, t.GH, github.AddIssueCommentRequest{Number: a.Number, Body: a.Body})
++	if err != nil {
++		return "", err
++	}
++	switch {
++	case r.ValidationErr != "":
++		return "posted=false reason=validation\n" + r.ValidationErr, nil
++	case r.GitHubUnavailable:
++		return "posted=false reason=github_unavailable", nil
++	case r.NotFound:
++		return "posted=false reason=not_found", nil
++	case r.GitHubError != "":
++		return "posted=false reason=github_error\n" + r.GitHubError, nil
++	case r.Posted:
++		return fmt.Sprintf("posted=true url=%s id=%d", r.URL, r.ID), nil
++	default:
++		return "posted=false reason=unknown", nil
++	}
++}
++
++type IssueAddCommentResult struct {
++	Posted            bool
++	URL               string
++	ID                int64
++	ValidationErr     string
++	GitHubUnavailable bool
++	NotFound          bool
++	GitHubError       string
++}
++
++// AddIssueComment is a deterministic preflight: invalid input never reaches GitHub.
++func AddIssueComment(ctx context.Context, gh github.Interface, req github.AddIssueCommentRequest) (IssueAddCommentResult, error) {
++	var r IssueAddCommentResult
++	if req.Number <= 0 {
++		r.ValidationErr = "issue number must be positive"
++		return r, nil
++	}
++	req.Body = strings.TrimSpace(req.Body)
++	if req.Body == "" {
++		r.ValidationErr = "body is empty"
++		return r, nil
++	}
++	if len(req.Body) > prCommentBodyCap {
++		r.ValidationErr = fmt.Sprintf("body is %d chars; cap is %d", len(req.Body), prCommentBodyCap)
++		return r, nil
++	}
++	out, err := gh.AddIssueComment(ctx, req)
++	if errors.Is(err, github.ErrGitHubUnavailable) {
++		r.GitHubUnavailable = true
++		return r, nil
++	}
++	if errors.Is(err, github.ErrIssueNotFound) {
++		r.NotFound = true
++		return r, nil
++	}
++	if err != nil {
++		r.GitHubError = err.Error()
++		return r, nil
++	}
++	r.Posted = true
++	r.URL = out.URL
++	r.ID = out.ID
++	return r, nil
++}
++
++// GHIssueUpdateTool applies only fields the operator explicitly selected.
++type GHIssueUpdateTool struct{ GH github.Interface }
++
++func (t *GHIssueUpdateTool) Name() string { return "issue_update" }
++func (t *GHIssueUpdateTool) Description() string {
++	return "Approval-gated update of an existing GitHub Issue title and/or body; no field is changed unless explicitly given. Rejects PR-shaped identities and accidental empty fields."
++}
++func (t *GHIssueUpdateTool) Schema() map[string]any {
++	return map[string]any{
++		"type": "object",
++		"properties": map[string]any{
++			"number": map[string]any{"type": "integer", "description": "Existing GitHub issue number"},
++			"title":  map[string]any{"type": "string", "description": "New title (omit to leave unchanged)"},
++			"body":   map[string]any{"type": "string", "description": "New body Markdown (omit to leave unchanged)"},
++		}, "required": []string{"number"},
++	}
++}
++func (t *GHIssueUpdateTool) RequiresApproval(string) bool { return true }
++func (t *GHIssueUpdateTool) PreviewCall(argsJSON string) string {
++	var a struct {
++		Number int     `json:"number"`
++		Title  *string `json:"title"`
++		Body   *string `json:"body"`
++	}
++	_ = json.Unmarshal([]byte(argsJSON), &a)
++	var s strings.Builder
++	fmt.Fprintf(&s, "issue_update(number=%d)", a.Number)
++	if a.Title != nil {
++		fmt.Fprintf(&s, "\nTitle: %s", *a.Title)
++	}
++	if a.Body != nil {
++		fmt.Fprintf(&s, "\nBody:\n%s", *a.Body)
++	}
++	return s.String()
++}
++func (t *GHIssueUpdateTool) Execute(ctx context.Context, argsJSON string) (string, error) {
++	var a struct {
++		Number int     `json:"number"`
++		Title  *string `json:"title"`
++		Body   *string `json:"body"`
++	}
++	if err := json.Unmarshal([]byte(argsJSON), &a); err != nil {
++		return "", fmt.Errorf("issue_update: invalid args: %w", err)
++	}
++	if t.GH == nil {
++		return "", errors.New("issue_update: GitHub adapter unavailable")
++	}
++	res, err := UpdateIssue(ctx, t.GH, github.UpdateIssueRequest{Number: a.Number, Title: a.Title, Body: a.Body})
++	if err != nil {
++		return "", err
++	}
++	switch {
++	case res.ValidationErr != "":
++		return "updated=false reason=validation\n" + res.ValidationErr, nil
++	case res.GitHubUnavailable:
++		return "updated=false reason=github_unavailable", nil
++	case res.NotFound:
++		return "updated=false reason=not_found", nil
++	case res.GitHubError != "":
++		return "updated=false reason=github_error\n" + res.GitHubError, nil
++	case res.Updated:
++		return fmt.Sprintf("updated=true url=%s number=%d", res.URL, res.Number), nil
++	default:
++		return "updated=false reason=unknown", nil
++	}
++}
++
++type IssueUpdateResult struct {
++	Updated           bool
++	URL               string
++	Number            int
++	ValidationErr     string
++	GitHubUnavailable bool
++	NotFound          bool
++	GitHubError       string
++}
++
++// UpdateIssue validates the exact requested fields before any adapter mutation.
++func UpdateIssue(ctx context.Context, gh github.Interface, req github.UpdateIssueRequest) (IssueUpdateResult, error) {
++	var res IssueUpdateResult
++	if req.Number <= 0 {
++		res.ValidationErr = "issue number must be positive"
++		return res, nil
++	}
++	if req.Title == nil && req.Body == nil {
++		res.ValidationErr = "title or body is required"
++		return res, nil
++	}
++	if req.Title != nil {
++		if v := validatePRTitle(*req.Title); v != "" {
++			res.ValidationErr = "title: " + v
++			return res, nil
++		}
++	}
++	if req.Body != nil {
++		if strings.TrimSpace(*req.Body) == "" {
++			res.ValidationErr = "empty body would clobber the existing issue body"
++			return res, nil
++		}
++	}
++	out, err := gh.UpdateIssue(ctx, req)
++	if errors.Is(err, github.ErrGitHubUnavailable) {
++		res.GitHubUnavailable = true
++		return res, nil
++	}
++	if errors.Is(err, github.ErrIssueNotFound) {
++		res.NotFound = true
++		return res, nil
++	}
++	if err != nil {
++		res.GitHubError = err.Error()
++		return res, nil
++	}
++	res.Updated = true
++	res.URL = out.URL
++	res.Number = out.Number
++	return res, nil
++}
+diff --git a/internal/agent/gh_issue_mutation_test.go b/internal/agent/gh_issue_mutation_test.go
+new file mode 100644
+index 0000000..ab658a9
+--- /dev/null
++++ b/internal/agent/gh_issue_mutation_test.go
+@@ -0,0 +1,111 @@
++package agent
++
++import (
++	"context"
++	"errors"
++	"strings"
++	"testing"
++
++	"github.com/yottadynamics/yottacode/internal/github"
++)
++
++type issueCommentProbeGH struct {
++	github.Interface
++	calls int
++	req   github.AddIssueCommentRequest
++	err   error
++}
++
++func (p *issueCommentProbeGH) AddIssueComment(_ context.Context, req github.AddIssueCommentRequest) (github.AddIssueCommentResult, error) {
++	p.calls++
++	p.req = req
++	if p.err != nil {
++		return github.AddIssueCommentResult{}, p.err
++	}
++	return github.AddIssueCommentResult{URL: "https://github.com/o/r/issues/7#issuecomment-2", ID: 2}, nil
++}
++func TestIssueAddComment_NewApprovalGatedUserAction(t *testing.T) {
++	fake := &issueCommentProbeGH{}
++	tool := &GHIssueAddCommentTool{GH: fake}
++	if tool.Name() != "issue_add_comment" || !tool.RequiresApproval("") {
++		t.Fatalf("not registered approval-gated tool")
++	}
++	preview := tool.PreviewCall(`{"number":7,"body":"Follow-up **note**"}`)
++	if !strings.Contains(preview, "7") || !strings.Contains(preview, "Follow-up **note**") {
++		t.Fatalf("missing approval preview: %s", preview)
++	}
++	for _, input := range []string{
++		`{"number":0,"body":"ok"}`,
++		`{"number":7,"body":"   "}`,
++	} {
++		out, err := tool.Execute(context.Background(), input)
++		if err != nil || !strings.Contains(out, "reason=validation") || fake.calls != 0 {
++			t.Fatalf("input %s: %s, %v calls %d", input, out, err, fake.calls)
++		}
++	}
++	out, err := tool.Execute(context.Background(), `{"number":7,"body":"Follow-up **note**"}`)
++	if err != nil || !strings.Contains(out, "posted=true") || fake.calls != 1 || fake.req.Number != 7 || fake.req.Body != "Follow-up **note**" {
++		t.Fatalf("new action: %q %v %+v", out, err, fake)
++	}
++	fake.err = github.ErrIssueNotFound
++	out, err = tool.Execute(context.Background(), `{"number":8,"body":"note"}`)
++	if err != nil || !strings.Contains(out, "reason=not_found") {
++		t.Fatalf("missing issue: %q %v", out, err)
++	}
++	fake.err = errors.New("network failure")
++	out, err = tool.Execute(context.Background(), `{"number":8,"body":"note"}`)
++	if err != nil || !strings.Contains(out, "reason=github_error") {
++		t.Fatalf("provider failure: %q %v", out, err)
++	}
++}
++
++type issueUpdateProbeGH struct {
++	github.Interface
++	calls int
++	req   github.UpdateIssueRequest
++	err   error
++}
++
++func (p *issueUpdateProbeGH) UpdateIssue(_ context.Context, req github.UpdateIssueRequest) (github.UpdateIssueResult, error) {
++	p.calls++
++	p.req = req
++	if p.err != nil {
++		return github.UpdateIssueResult{}, p.err
++	}
++	return github.UpdateIssueResult{URL: "https://github.com/o/r/issues/7", Number: req.Number}, nil
++}
++func TestIssueUpdate_NewPartialChangeAndApproval(t *testing.T) {
++	probe := &issueUpdateProbeGH{}
++	tool := &GHIssueUpdateTool{GH: probe}
++	if tool.Name() != "issue_update" || !tool.RequiresApproval("{}") {
++		t.Fatal("approval not required")
++	}
++	preview := tool.PreviewCall(`{"number":7,"title":"New title"}`)
++	if !strings.Contains(preview, "New title") || !strings.Contains(preview, "7") {
++		t.Fatalf("unsafe preview %q", preview)
++	}
++	for _, raw := range []string{
++		`{"number":0,"title":"X"}`,
++		`{"number":7}`,
++		`{"number":7,"title":"  "}`,
++		`{"number":7,"body":"   "}`,
++	} {
++		got, err := tool.Execute(context.Background(), raw)
++		if err != nil || !strings.Contains(got, "reason=validation") || probe.calls != 0 {
++			t.Fatalf("invalid %s: %q %v calls=%d", raw, got, err, probe.calls)
++		}
++	}
++	output, err := tool.Execute(context.Background(), `{"number":7,"title":"New title"}`)
++	if err != nil || !strings.Contains(output, "updated=true") || probe.calls != 1 || probe.req.Title == nil || *probe.req.Title != "New title" || probe.req.Body != nil {
++		t.Fatalf("partial title update: %q %v %+v", output, err, probe)
++	}
++	output, err = tool.Execute(context.Background(), `{"number":7,"body":"Revised body"}`)
++	if err != nil || !strings.Contains(output, "updated=true") || probe.calls != 2 || probe.req.Title != nil || probe.req.Body == nil || *probe.req.Body != "Revised body" {
++		t.Fatalf("partial body update: %q %v %+v", output, err, probe)
++	}
++	probe.err = github.ErrIssueNotFound
++	output, err = tool.Execute(context.Background(), `{"number":8,"title":"New"}`)
++	if err != nil || !strings.Contains(output, "reason=not_found") {
++		t.Fatalf("missing issue: %q %v", output, err)
++	}
++}
+diff --git a/internal/agent/gh_pr_workflow_test.go b/internal/agent/gh_pr_workflow_test.go
+index cd19217..ef6c99b 100644
+--- a/internal/agent/gh_pr_workflow_test.go
++++ b/internal/agent/gh_pr_workflow_test.go
+@@ -133,6 +133,10 @@ func (f *fakeGH) CreateIssue(_ context.Context, req github.CreateIssueRequest) (
+ 	return f.createIssueRes, f.createIssueErr
+ }
+ 
++func (f *fakeGH) AddIssueComment(_ context.Context, req github.AddIssueCommentRequest) (github.AddIssueCommentResult, error) {
++	return github.AddIssueCommentResult{URL: "https://github.com/o/r/issues/7#issuecomment-2", ID: 2}, nil
++}
++
+ func (f *fakeGH) RateLimit() github.RateLimitSnapshot {
+ 	// Test double — no rate tracking. Zero snapshot signals
+ 	// "unset" to callers checking IsSet().
+@@ -1292,3 +1296,7 @@ func gitRun(t *testing.T, dir string, args ...string) {
+ 		t.Fatalf("git %v: %v: %s", args, err, out)
+ 	}
+ }
++
++func (f *fakeGH) UpdateIssue(_ context.Context, req github.UpdateIssueRequest) (github.UpdateIssueResult, error) {
++	return github.UpdateIssueResult{URL: "https://github.com/o/r/issues/7", Number: req.Number}, nil
++}
+diff --git a/internal/agentruntime/runtime.go b/internal/agentruntime/runtime.go
+index 9d8f69a..906c31c 100644
+--- a/internal/agentruntime/runtime.go
++++ b/internal/agentruntime/runtime.go
+@@ -528,6 +528,8 @@ func (b *Builder) Build(ctx context.Context, spec SessionSpec) (*Runtime, error)
+ 	reg.Register(&agent.GHIssueListTool{Cwd: cwdRef, GH: ghClient})
+ 	reg.Register(&agent.GHIssueContextTool{Cwd: cwdRef})
+ 	reg.Register(&agent.GHIssueCreateTool{Cwd: cwdRef, GH: ghClient})
++	reg.Register(&agent.GHIssueAddCommentTool{GH: ghClient})
++	reg.Register(&agent.GHIssueUpdateTool{GH: ghClient})
+ 	// git_push's GH dependency is only for the best-effort PR-URL
+ 	// lookup after a successful push (GitPushTool tolerates a nil GH —
+ 	// see git_push_workflow.go's PushBranch — but every caller gets the
+diff --git a/internal/agentruntime/runtime_test.go b/internal/agentruntime/runtime_test.go
+index f83ee9c..0a1851b 100644
+--- a/internal/agentruntime/runtime_test.go
++++ b/internal/agentruntime/runtime_test.go
+@@ -171,7 +171,7 @@ func TestBuild_GitHubToolSuiteRegistered(t *testing.T) {
+ 	names := []string{
+ 		"pr_context", "pr_create", "pr_review_context", "pr_watch_checks",
+ 		"pr_check_logs", "pr_rerun_checks", "code_review_context", "pr_read",
+-		"issue_read", "issue_list", "issue_context", "issue_create",
++		"issue_read", "issue_list", "issue_context", "issue_create", "issue_add_comment", "issue_update",
+ 		"git_push", "pr_update", "pr_add_comment",
+ 	}
+ 	for _, disableWorktree := range []bool{true, false} {
+diff --git a/internal/github/cache.go b/internal/github/cache.go
+index 127901d..877970a 100644
+--- a/internal/github/cache.go
++++ b/internal/github/cache.go
+@@ -318,3 +318,27 @@ func (c *CachingClient) CreateIssue(ctx context.Context, req CreateIssueRequest)
+ 	c.mu.Unlock()
+ 	return res, nil
+ }
++
++// AddIssueComment invalidates issue-detail snapshots after a successful write,
++// because those snapshots can carry the most recent comments.
++func (c *CachingClient) AddIssueComment(ctx context.Context, req AddIssueCommentRequest) (AddIssueCommentResult, error) {
++	res, err := c.Inner.AddIssueComment(ctx, req)
++	if err == nil {
++		c.mu.Lock()
++		c.issues = map[string]IssueDetails{}
++		c.mu.Unlock()
++	}
++	return res, err
++}
++
++// UpdateIssue changes read Issue details and list summaries; invalidate both.
++func (c *CachingClient) UpdateIssue(ctx context.Context, req UpdateIssueRequest) (UpdateIssueResult, error) {
++	out, err := c.Inner.UpdateIssue(ctx, req)
++	if err == nil {
++		c.mu.Lock()
++		c.issues = map[string]IssueDetails{}
++		c.issueLists = map[string][]IssueSummary{}
++		c.mu.Unlock()
++	}
++	return out, err
++}
+diff --git a/internal/github/cache_test.go b/internal/github/cache_test.go
+index a416843..255cb78 100644
+--- a/internal/github/cache_test.go
++++ b/internal/github/cache_test.go
+@@ -435,3 +435,49 @@ func TestIssueListKey_DistinguishesFilters(t *testing.T) {
+ 		t.Errorf("assignee should appear in key; got %q", b)
+ 	}
+ }
++
++func (c *countingInner) AddIssueComment(_ context.Context, req AddIssueCommentRequest) (AddIssueCommentResult, error) {
++	return AddIssueCommentResult{URL: "https://github.com/test/repo/issues/12#issuecomment-123", ID: 123}, nil
++}
++
++func TestCachingClientIssueCommentInvalidatesIssueDetails(t *testing.T) {
++	inner := &countingInner{issueRes: IssueDetails{Number: 7}}
++	cache := NewCachingClient(inner)
++	req := ReadIssueRequest{Owner: "o", Repo: "r", Number: 7, MaxComments: 5}
++	for i := 0; i < 2; i++ {
++		if _, err := cache.ReadIssue(context.Background(), req); err != nil {
++			t.Fatal(err)
++		}
++	}
++	if inner.readIssueCount != 1 {
++		t.Fatalf("cache miss before write: got=%d", inner.readIssueCount)
++	}
++	if _, err := cache.AddIssueComment(context.Background(), AddIssueCommentRequest{Owner: "o", Repo: "r", Number: 7, Body: "note"}); err != nil {
++		t.Fatal(err)
++	}
++	if _, err := cache.ReadIssue(context.Background(), req); err != nil {
++		t.Fatal(err)
++	}
++	if inner.readIssueCount != 2 {
++		t.Fatalf("stale cache after comment: read count=%d", inner.readIssueCount)
++	}
++}
++
++func (c *countingInner) UpdateIssue(_ context.Context, req UpdateIssueRequest) (UpdateIssueResult, error) {
++	return UpdateIssueResult{URL: "https://github.com/o/r/issues/7", Number: req.Number}, nil
++}
++
++func TestCachingClientIssueUpdateInvalidatesDetailsAndLists(t *testing.T) {
++	inner := &countingInner{issueRes: IssueDetails{Number: 7}, issuesRes: []IssueSummary{{Number: 7}}}
++	cl := NewCachingClient(inner)
++	_, _ = cl.ReadIssue(context.Background(), ReadIssueRequest{Owner: "o", Repo: "r", Number: 7, MaxComments: 1})
++	_, _ = cl.ListOpenIssues(context.Background(), ListIssuesRequest{Owner: "o", Repo: "r"})
++	title := "Changed"
++	_, err := cl.UpdateIssue(context.Background(), UpdateIssueRequest{Owner: "o", Repo: "r", Number: 7, Title: &title})
++	if err != nil {
++		t.Fatal(err)
++	}
++	if got := cl.Stats(); got.Issues != 0 || got.IssueLists != 0 {
++		t.Fatalf("stale after issue update: %+v", got)
++	}
++}
+diff --git a/internal/github/interface.go b/internal/github/interface.go
+index e502a7e..dd9f20f 100644
+--- a/internal/github/interface.go
++++ b/internal/github/interface.go
+@@ -121,6 +121,12 @@ type Interface interface {
+ 	// generic execution failure.
+ 	CreateIssue(ctx context.Context, req CreateIssueRequest) (CreateIssueResult, error)
+ 
++	// AddIssueComment posts one approval-gated top-level comment to an issue.
++	AddIssueComment(ctx context.Context, req AddIssueCommentRequest) (AddIssueCommentResult, error)
++
++	// UpdateIssue changes only explicitly provided issue title/body fields.
++	UpdateIssue(ctx context.Context, req UpdateIssueRequest) (UpdateIssueResult, error)
++
+ 	// RateLimit returns the most recent rate-limit snapshot the
+ 	// implementation has observed. Snapshot.IsSet() is false when
+ 	// no API call has populated the tracker yet. Used by the doctor
+@@ -393,3 +399,30 @@ type CreateIssueResult struct {
+ 	URL    string
+ 	Number int
+ }
++
++// AddIssueCommentRequest is explicit about the target issue identity.
++// Owner/Repo can be inferred by the typed client from the current git checkout.
++type AddIssueCommentRequest struct {
++	Owner  string
++	Repo   string
++	Number int
++	Body   string
++}
++
++type AddIssueCommentResult struct {
++	URL string
++	ID  int64
++}
++
++// UpdateIssueRequest leaves fields not selected by the user unchanged.
++type UpdateIssueRequest struct {
++	Owner  string
++	Repo   string
++	Number int
++	Title  *string
++	Body   *string
++}
++type UpdateIssueResult struct {
++	URL    string
++	Number int
++}
+diff --git a/internal/github/typed.go b/internal/github/typed.go
+index 1530e57..ecd140c 100644
+--- a/internal/github/typed.go
++++ b/internal/github/typed.go
+@@ -1049,3 +1049,91 @@ func mapStatus(st *gogithub.RepoStatus) CheckRun {
+ 	}
+ 	return c
+ }
++
++// AddIssueComment rejects PR-shaped issue identities before any mutation.
++func (c *TypedClient) AddIssueComment(ctx context.Context, req AddIssueCommentRequest) (AddIssueCommentResult, error) {
++	var res AddIssueCommentResult
++	if req.Number <= 0 || strings.TrimSpace(req.Body) == "" {
++		return res, fmt.Errorf("add issue comment: positive issue number and nonempty body required")
++	}
++	cl, err := c.init(ctx)
++	if err != nil {
++		return res, err
++	}
++	owner, repo, err := c.resolveOwnerRepo(ctx, req.Owner, req.Repo)
++	if err != nil {
++		return res, err
++	}
++	issue, r, err := cl.Issues.Get(ctx, owner, repo, req.Number)
++	c.recordRate(r)
++	if err != nil {
++		if errors.Is(classifyAPIError(err), ErrPRNotFound) {
++			return res, ErrIssueNotFound
++		}
++		return res, fmt.Errorf("add issue comment: verify issue: %w", classifyAPIError(err))
++	}
++	if issue == nil || issue.PullRequestLinks != nil {
++		return res, ErrIssueNotFound
++	}
++	created, r, err := cl.Issues.CreateComment(ctx, owner, repo, req.Number,
++		&gogithub.IssueComment{Body: gogithub.String(strings.TrimSpace(req.Body))})
++	c.recordRate(r)
++	if err != nil {
++		if errors.Is(classifyAPIError(err), ErrPRNotFound) {
++			return res, ErrIssueNotFound
++		}
++		return res, fmt.Errorf("add issue comment: %w", classifyAPIError(err))
++	}
++	if created != nil {
++		res.URL = created.GetHTMLURL()
++		res.ID = created.GetID()
++	}
++	return res, nil
++}
++
++// UpdateIssue makes a partial Issue update, never a PR update.
++func (c *TypedClient) UpdateIssue(ctx context.Context, req UpdateIssueRequest) (UpdateIssueResult, error) {
++	var res UpdateIssueResult
++	if req.Number <= 0 || (req.Title == nil && req.Body == nil) {
++		return res, fmt.Errorf("update issue: positive issue number and at least one field are required")
++	}
++	cl, err := c.init(ctx)
++	if err != nil {
++		return res, err
++	}
++	owner, repo, err := c.resolveOwnerRepo(ctx, req.Owner, req.Repo)
++	if err != nil {
++		return res, err
++	}
++	issue, r, err := cl.Issues.Get(ctx, owner, repo, req.Number)
++	c.recordRate(r)
++	if err != nil {
++		if errors.Is(classifyAPIError(err), ErrPRNotFound) {
++			return res, ErrIssueNotFound
++		}
++		return res, fmt.Errorf("update issue: verify: %w", classifyAPIError(err))
++	}
++	if issue == nil || issue.PullRequestLinks != nil {
++		return res, ErrIssueNotFound
++	}
++	change := &gogithub.IssueRequest{}
++	if req.Title != nil {
++		change.Title = req.Title
++	}
++	if req.Body != nil {
++		change.Body = req.Body
++	}
++	edited, r, err := cl.Issues.Edit(ctx, owner, repo, req.Number, change)
++	c.recordRate(r)
++	if err != nil {
++		if errors.Is(classifyAPIError(err), ErrPRNotFound) {
++			return res, ErrIssueNotFound
++		}
++		return res, fmt.Errorf("update issue: %w", classifyAPIError(err))
++	}
++	if edited != nil {
++		res.URL = edited.GetHTMLURL()
++		res.Number = edited.GetNumber()
++	}
++	return res, nil
++}
+diff --git a/internal/github/typed_issue_comment_test.go b/internal/github/typed_issue_comment_test.go
+new file mode 100644
+index 0000000..466922a
+--- /dev/null
++++ b/internal/github/typed_issue_comment_test.go
+@@ -0,0 +1,113 @@
++package github
++
++import (
++	"context"
++	"encoding/json"
++	"io"
++	"net/http"
++	"strings"
++	"testing"
++)
++
++type localIssueCommentHTTP struct {
++	paths    []string
++	postBody []byte
++	isPR     bool
++}
++
++func (rt *localIssueCommentHTTP) RoundTrip(r *http.Request) (*http.Response, error) {
++	rt.paths = append(rt.paths, r.Method+" "+r.URL.Path)
++	status := http.StatusOK
++	payload := `{"number":7,"html_url":"https://github.com/o/r/issues/7"}`
++	if r.Method == "GET" && rt.isPR {
++		payload = `{"number":7,"pull_request":{"url":"https://api.github.com/repos/o/r/pulls/7"}}`
++	}
++	if r.Method == "POST" {
++		status = http.StatusCreated
++		rt.postBody, _ = io.ReadAll(r.Body)
++		payload = `{"id":2,"html_url":"https://github.com/o/r/issues/7#issuecomment-2"}`
++	}
++	return &http.Response{StatusCode: status, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(strings.NewReader(payload)), Request: r}, nil
++}
++func TestNativeIssueAddComment_SendsGitHubWriteOnlyAfterIssueCheck(t *testing.T) {
++	t.Setenv("GITHUB_TOKEN", "test-token")
++	rt := &localIssueCommentHTTP{}
++	c := &TypedClient{Cwd: t.TempDir(), HTTPClient: &http.Client{Transport: rt}}
++	out, err := c.AddIssueComment(context.Background(), AddIssueCommentRequest{Owner: "o", Repo: "r", Number: 7, Body: "A comment"})
++	if err != nil || out.ID != 2 || out.URL == "" {
++		t.Fatalf("posted: %+v, %v", out, err)
++	}
++	if len(rt.paths) != 2 || rt.paths[0] != "GET /repos/o/r/issues/7" || rt.paths[1] != "POST /repos/o/r/issues/7/comments" {
++		t.Fatalf("unexpected HTTP activity: %v", rt.paths)
++	}
++	var wire map[string]string
++	if err := json.Unmarshal(rt.postBody, &wire); err != nil || wire["body"] != "A comment" {
++		t.Fatalf("wire: %s %v", rt.postBody, err)
++	}
++	rt2 := &localIssueCommentHTTP{isPR: true}
++	c2 := &TypedClient{Cwd: t.TempDir(), HTTPClient: &http.Client{Transport: rt2}}
++	_, err = c2.AddIssueComment(context.Background(), AddIssueCommentRequest{Owner: "o", Repo: "r", Number: 7, Body: "No PR comments"})
++	if err != ErrIssueNotFound || len(rt2.paths) != 1 {
++		t.Fatalf("must reject PR, err=%v calls=%v", err, rt2.paths)
++	}
++}
++
++type localIssueUpdateHTTP struct {
++	calls []string
++	body  []byte
++	isPR  bool
++}
++
++func (rt *localIssueUpdateHTTP) RoundTrip(r *http.Request) (*http.Response, error) {
++	rt.calls = append(rt.calls, r.Method+" "+r.URL.Path)
++	status := http.StatusOK
++	payload := `{"number":7,"html_url":"https://github.com/o/r/issues/7"}`
++	if r.Method == "GET" && rt.isPR {
++		payload = `{"number":7,"pull_request":{"url":"https://api.github.com/repos/o/r/pulls/7"}}`
++	}
++	if r.Method == "PATCH" {
++		rt.body, _ = io.ReadAll(r.Body)
++		payload = `{"number":7,"html_url":"https://github.com/o/r/issues/7"}`
++	}
++	return &http.Response{StatusCode: status, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(strings.NewReader(payload)), Request: r}, nil
++}
++func TestNativeUpdateIssue_PreservesOmittedFieldsAndRejectsPR(t *testing.T) {
++	t.Setenv("GITHUB_TOKEN", "test-token")
++	title := "New title"
++	rt := &localIssueUpdateHTTP{}
++	cl := &TypedClient{Cwd: t.TempDir(), HTTPClient: &http.Client{Transport: rt}}
++	out, err := cl.UpdateIssue(context.Background(), UpdateIssueRequest{Owner: "o", Repo: "r", Number: 7, Title: &title})
++	if err != nil || out.Number != 7 {
++		t.Fatalf("title-only update %+v: %v", out, err)
++	}
++	if len(rt.calls) != 2 || rt.calls[0] != "GET /repos/o/r/issues/7" || rt.calls[1] != "PATCH /repos/o/r/issues/7" {
++		t.Fatalf("calls=%v", rt.calls)
++	}
++	var wire map[string]any
++	if err := json.Unmarshal(rt.body, &wire); err != nil || wire["title"] != "New title" {
++		t.Fatalf("wire=%s err=%v", rt.body, err)
++	}
++	if _, present := wire["body"]; present {
++		t.Fatalf("body must be omitted on title-only change: %s", rt.body)
++	}
++	body := "Revised body"
++	rt2 := &localIssueUpdateHTTP{}
++	cl2 := &TypedClient{Cwd: t.TempDir(), HTTPClient: &http.Client{Transport: rt2}}
++	_, err = cl2.UpdateIssue(context.Background(), UpdateIssueRequest{Owner: "o", Repo: "r", Number: 7, Body: &body})
++	if err != nil {
++		t.Fatal(err)
++	}
++	wire = map[string]any{}
++	if err := json.Unmarshal(rt2.body, &wire); err != nil || wire["body"] != "Revised body" {
++		t.Fatalf("wire=%s err=%v", rt2.body, err)
++	}
++	if _, present := wire["title"]; present {
++		t.Fatalf("title must be omitted on body-only change: %s", rt2.body)
++	}
++	rtPR := &localIssueUpdateHTTP{isPR: true}
++	clPR := &TypedClient{Cwd: t.TempDir(), HTTPClient: &http.Client{Transport: rtPR}}
++	_, err = clPR.UpdateIssue(context.Background(), UpdateIssueRequest{Owner: "o", Repo: "r", Number: 7, Title: &title})
++	if err != ErrIssueNotFound || len(rtPR.calls) != 1 {
++		t.Fatalf("PR shaped source must block write: %v, %v", err, rtPR.calls)
++	}
++}
+diff --git a/internal/permissions/permissions_test.go b/internal/permissions/permissions_test.go
+index a1c5cdc..a6baecd 100644
+--- a/internal/permissions/permissions_test.go
++++ b/internal/permissions/permissions_test.go
+@@ -445,7 +445,7 @@ func TestEvaluate_GithubCatchAllWildcard(t *testing.T) {
+ 	seed(t, filepath.Join(cwd, ".yottacode", "permissions.json"),
+ 		[]string{"Github(*)"}, nil, nil)
+ 	p, _ := LoadWithSystemPath(cwd, "")
+-	for _, tool := range []string{"pr_context", "pr_read", "pr_create", "pr_update", "pr_add_comment", "pr_check_logs", "pr_rerun_checks", "issue_context", "issue_read", "issue_list", "issue_create", "pr_review_context", "pr_watch_checks"} {
++	for _, tool := range []string{"pr_context", "pr_read", "pr_create", "pr_update", "pr_add_comment", "pr_check_logs", "pr_rerun_checks", "issue_context", "issue_read", "issue_list", "issue_create", "issue_add_comment", "issue_update", "pr_review_context", "pr_watch_checks"} {
+ 		got := p.Evaluate(tool, `{}`)
+ 		if got != Allow {
+ 			t.Errorf("Github(*) should match %s; got %v", tool, got)
+@@ -562,6 +562,8 @@ func TestTargetFor_GithubVerbMapping(t *testing.T) {
+ 		{"issue_read", "read_issue"},
+ 		{"issue_list", "list_open_issues"},
+ 		{"issue_create", "create_issue"},
++		{"issue_add_comment", "add_issue_comment"},
++		{"issue_update", "update_issue"},
+ 	}
+ 	for _, tc := range cases {
+ 		t.Run(tc.toolName, func(t *testing.T) {
+@@ -1228,3 +1230,23 @@ func BenchmarkEvaluate_AbsoluteRulesMiss(b *testing.B) {
+ 		p.Evaluate("edit_file", args)
+ 	}
+ }
++
++func TestEvaluate_GithubIssueCommentDenyWinsOverWildcard(t *testing.T) {
++	cwd := t.TempDir()
++	seed(t, filepath.Join(cwd, ".yottacode", "permissions.json"),
++		[]string{"Github(*)"}, nil, []string{"Github(add_issue_comment)"})
++	p, _ := LoadWithSystemPath(cwd, "")
++	if got := p.Evaluate("issue_add_comment", `{"number":7,"body":"note"}`); got != Deny {
++		t.Errorf("Github(add_issue_comment) deny must bind even under wildcard allow; got %v", got)
++	}
++}
++
++func TestEvaluate_GithubIssueUpdateDenyOverridesWildcard(t *testing.T) {
++	cwd := t.TempDir()
++	seed(t, filepath.Join(cwd, ".yottacode", "permissions.json"),
++		[]string{"Github(*)"}, nil, []string{"Github(update_issue)"})
++	p, _ := LoadWithSystemPath(cwd, "")
++	if got := p.Evaluate("issue_update", `{"number":7,"title":"New title"}`); got != Deny {
++		t.Errorf("Github(update_issue) deny must override wildcard; got %v", got)
++	}
++}
+diff --git a/internal/permissions/tool_targets.go b/internal/permissions/tool_targets.go
+index af10900..7941767 100644
+--- a/internal/permissions/tool_targets.go
++++ b/internal/permissions/tool_targets.go
+@@ -246,6 +246,10 @@ func targetFor(toolName, argsJSON, cwd string) Target {
+ 		return Target{PermName: "Github", Descriptor: "list_open_issues"}
+ 	case "issue_create":
+ 		return Target{PermName: "Github", Descriptor: "create_issue"}
++	case "issue_add_comment":
++		return Target{PermName: "Github", Descriptor: "add_issue_comment"}
++	case "issue_update":
++		return Target{PermName: "Github", Descriptor: "update_issue"}
+ 	}
+ 	return Target{}
+ }
+diff --git a/internal/tui/inputbar_test.go b/internal/tui/inputbar_test.go
+index 99db4ea..4a58d7b 100644
+--- a/internal/tui/inputbar_test.go
++++ b/internal/tui/inputbar_test.go
+@@ -65,6 +65,13 @@ func (c *statusBarPRClient) CreateIssue(context.Context, githubapi.CreateIssueRe
+ 	return githubapi.CreateIssueResult{}, nil
+ }
+ 
++func (c *statusBarPRClient) AddIssueComment(context.Context, githubapi.AddIssueCommentRequest) (githubapi.AddIssueCommentResult, error) {
++	return githubapi.AddIssueCommentResult{}, nil
++}
++func (c *statusBarPRClient) UpdateIssue(context.Context, githubapi.UpdateIssueRequest) (githubapi.UpdateIssueResult, error) {
++	return githubapi.UpdateIssueResult{}, nil
++}
++
+ func (c *statusBarPRClient) RateLimit() githubapi.RateLimitSnapshot {
+ 	return githubapi.RateLimitSnapshot{}
+ }
