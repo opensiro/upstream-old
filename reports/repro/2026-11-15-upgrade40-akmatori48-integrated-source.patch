@@ -790,65 +790,24 @@ new file mode 100644
 diff --git a/mcp-gateway/internal/tools/registry.go b/mcp-gateway/internal/tools/registry.go
 --- a/mcp-gateway/internal/tools/registry.go
 +++ b/mcp-gateway/internal/tools/registry.go
-@@ -18,18 +18,19 @@
- 	"github.com/akmatori/mcp-gateway/internal/tools/catchpoint"
- 	"github.com/akmatori/mcp-gateway/internal/tools/clickhouse"
- 	"github.com/akmatori/mcp-gateway/internal/tools/events"
+@@ -21,2 +20,0 @@
 -	"github.com/akmatori/mcp-gateway/internal/tools/knowledge"
 -	"github.com/akmatori/mcp-gateway/internal/tools/telegram"
- 	"github.com/akmatori/mcp-gateway/internal/tools/grafana"
- 	"github.com/akmatori/mcp-gateway/internal/tools/httpconnector"
- 	"github.com/akmatori/mcp-gateway/internal/tools/incidents"
- 	"github.com/akmatori/mcp-gateway/internal/tools/jira"
- 	"github.com/akmatori/mcp-gateway/internal/tools/k8s"
+@@ -27,0 +26 @@
 +	"github.com/akmatori/mcp-gateway/internal/tools/knowledge"
- 	"github.com/akmatori/mcp-gateway/internal/tools/netbox"
- 	"github.com/akmatori/mcp-gateway/internal/tools/pagerduty"
- 	"github.com/akmatori/mcp-gateway/internal/tools/postgresql"
- 	"github.com/akmatori/mcp-gateway/internal/tools/proposals"
- 	"github.com/akmatori/mcp-gateway/internal/tools/ssh"
+@@ -32,0 +32,2 @@
 +	"github.com/akmatori/mcp-gateway/internal/tools/telegram"
 +	"github.com/akmatori/mcp-gateway/internal/tools/victorialogs"
- 	"github.com/akmatori/mcp-gateway/internal/tools/victoriametrics"
- 	"github.com/akmatori/mcp-gateway/internal/tools/zabbix"
- )
-@@ -38,6 +39,8 @@
- const (
- 	ZabbixRatePerSecond     = 10 // requests per second
- 	ZabbixBurstCapacity     = 20 // burst capacity
+@@ -40,0 +42,2 @@
 +	VLRatePerSecond         = 10 // requests per second
 +	VLRateBurst             = 20
- 	VMRatePerSecond         = 10 // requests per second
- 	VMBurstCapacity         = 20 // burst capacity
- 	CatchpointRatePerSecond = 10 // requests per second
-@@ -64,6 +67,7 @@
- 	logger          *log.Logger
- 	zabbixTool      *zabbix.ZabbixTool
- 	zabbixLimit     *ratelimit.Limiter
+@@ -66,0 +70 @@
 +	vlTool          *victorialogs.Tool
- 	vmTool          *victoriametrics.VictoriaMetricsTool
- 	vmLimit         *ratelimit.Limiter
- 	catchpointTool  *catchpoint.CatchpointTool
-@@ -127,6 +131,7 @@
- 
- 	// Register VictoriaMetrics tools with rate limiter
- 	r.registerVictoriaMetricsTools()
+@@ -129,0 +134 @@
 +	r.registerVictoriaLogsTools()
- 
- 	// Create rate limiter for Catchpoint: 10 req/sec, burst 20
- 	r.catchpointLimit = ratelimit.New(CatchpointRatePerSecond, CatchpointBurstCapacity)
-@@ -249,6 +254,7 @@
- 	"ssh":              true,
- 	"zabbix":           true,
- 	"victoria_metrics": true,
+@@ -251,0 +257 @@
 +	"victoria_logs":    true,
- 	"catchpoint":       true,
- 	"postgresql":       true,
- 	"grafana":          true,
-@@ -1083,6 +1089,50 @@
- 	)
- }
- 
+@@ -1085,0 +1092,44 @@
 +// registerVictoriaLogsTools adds a separate read-only LogsQL namespace.
 +// This does not extend the VictoriaMetrics PromQL protocol.
 +func (r *Registry) registerVictoriaLogsTools() {
@@ -893,24 +852,12 @@ diff --git a/mcp-gateway/internal/tools/registry.go b/mcp-gateway/internal/tools
 +	}
 +}
 +
- // registerVictoriaMetricsTools registers VictoriaMetrics-related tools
- func (r *Registry) registerVictoriaMetricsTools() {
- 	r.vmTool = victoriametrics.NewVictoriaMetricsTool(r.logger, r.vmLimit)
 diff --git a/mcp-gateway/internal/tools/schemas.go b/mcp-gateway/internal/tools/schemas.go
 --- a/mcp-gateway/internal/tools/schemas.go
 +++ b/mcp-gateway/internal/tools/schemas.go
-@@ -59,6 +59,7 @@
- 		"ssh":              getSSHSchema(),
- 		"zabbix":           getZabbixSchema(),
- 		"victoria_metrics": getVictoriaMetricsSchema(),
+@@ -61,0 +62 @@
 +		"victoria_logs":    getVictoriaLogsSchema(),
- 		"grafana":          getGrafanaSchema(),
- 		"catchpoint":       getCatchpointSchema(),
- 		"postgresql":       getPostgreSQLSchema(),
-@@ -377,6 +378,36 @@
- 	}
- }
- 
+@@ -379,0 +381,30 @@
 +// getVictoriaLogsSchema presents a native configuration form to the UI.
 +func getVictoriaLogsSchema() ToolTypeSchema {
 +	return ToolTypeSchema{
@@ -941,25 +888,13 @@ diff --git a/mcp-gateway/internal/tools/schemas.go b/mcp-gateway/internal/tools/
 +	}
 +}
 +
- func getVictoriaMetricsSchema() ToolTypeSchema {
- 	return ToolTypeSchema{
- 		Name:        "victoria_metrics",
 diff --git a/mcp-gateway/internal/tools/schemas_test.go b/mcp-gateway/internal/tools/schemas_test.go
 --- a/mcp-gateway/internal/tools/schemas_test.go
 +++ b/mcp-gateway/internal/tools/schemas_test.go
-@@ -616,7 +616,7 @@
- func TestGetToolSchemas_AllPresent(t *testing.T) {
- 	schemas := GetToolSchemas()
- 
+@@ -619 +619 @@
 -	expected := []string{"ssh", "zabbix", "victoria_metrics", "catchpoint", "postgresql", "grafana", "clickhouse", "pagerduty", "netbox", "kubernetes", "jira"}
 +	expected := []string{"ssh", "zabbix", "victoria_metrics", "victoria_logs", "catchpoint", "postgresql", "grafana", "clickhouse", "pagerduty", "netbox", "kubernetes", "jira"}
- 	for _, name := range expected {
- 		if _, ok := schemas[name]; !ok {
- 			t.Errorf("missing schema: %s", name)
-@@ -1226,3 +1226,37 @@
- 		}
- 	}
- }
+@@ -1228,0 +1229,34 @@
 +
 +func TestVictoriaLogsSchema_SecurityAndToolParity(t *testing.T) {
 +	schema, ok := GetToolSchema("victoria_logs")
@@ -1059,56 +994,29 @@ new file mode 100644
 diff --git a/internal/services/tool_service.go b/internal/services/tool_service.go
 --- a/internal/services/tool_service.go
 +++ b/internal/services/tool_service.go
-@@ -193,6 +193,7 @@
- 		{Name: "ssh", Description: "SSH remote command execution tool"},
- 		{Name: "zabbix", Description: "Zabbix monitoring integration"},
- 		{Name: "victoria_metrics", Description: "VictoriaMetrics time-series database integration"},
+@@ -195,0 +196 @@
 +		{Name: "victoria_logs", Description: "VictoriaLogs read-only LogsQL and SRE log inspection"},
- 		{Name: "catchpoint", Description: "Catchpoint Digital Experience Monitoring integration"},
- 		{Name: "postgresql", Description: "PostgreSQL database integration for read-only queries and diagnostics"},
- 		{Name: "grafana", Description: "Grafana observability platform integration"},
 diff --git a/internal/services/connector_catalog.go b/internal/services/connector_catalog.go
 --- a/internal/services/connector_catalog.go
 +++ b/internal/services/connector_catalog.go
-@@ -62,6 +62,7 @@
- 	{ID: "zabbix", Name: "Zabbix", Category: "monitoring", Description: "Query hosts, problems and history; receive Zabbix alerts.", ToolTypes: []string{"zabbix"}, AlertSourceTypes: []string{"zabbix"}},
- 	{ID: "grafana", Name: "Grafana", Category: "monitoring", Description: "Query dashboards, data sources and alert rules; receive Grafana alerts.", ToolTypes: []string{"grafana"}, AlertSourceTypes: []string{"grafana"}},
- 	{ID: "victoria_metrics", Name: "VictoriaMetrics", Category: "monitoring", Description: "Run PromQL/MetricsQL queries.", ToolTypes: []string{"victoria_metrics"}},
+@@ -64,0 +65 @@
 +	{ID: "victoria_logs", Name: "VictoriaLogs", Category: "monitoring", Description: "Inspect logs with bounded LogsQL queries.", ToolTypes: []string{"victoria_logs"}},
- 	{ID: "datadog", Name: "Datadog", Category: "monitoring", Description: "Receive alerts from Datadog monitors.", AlertSourceTypes: []string{"datadog"}},
- 	{ID: "catchpoint", Name: "Catchpoint", Category: "monitoring", Description: "Digital experience monitoring tests and alerts.", ToolTypes: []string{"catchpoint"}},
- 	{ID: "pagerduty", Name: "PagerDuty", Category: "incident", Description: "Look up incidents and on-call; receive PagerDuty webhooks.", ToolTypes: []string{"pagerduty"}, AlertSourceTypes: []string{"pagerduty"}},
 diff --git a/internal/services/http_connector_service.go b/internal/services/http_connector_service.go
 --- a/internal/services/http_connector_service.go
 +++ b/internal/services/http_connector_service.go
-@@ -12,7 +12,7 @@
- // by user-defined HTTP connectors or MCP servers.
- // Keep it equal to builtInToolNamespaces in mcp-gateway/internal/tools/registry.go.
- var reservedToolNamespaces = []string{
+@@ -15 +15 @@
 -	"ssh", "zabbix", "victoria_metrics", "catchpoint",
 +	"ssh", "zabbix", "victoria_metrics", "victoria_logs", "catchpoint",
- 	"postgresql", "grafana", "pagerduty", "clickhouse",
- 	"netbox", "kubernetes", "jira",
- 	"incidents", "proposals", "events", "runbooks", "memory",
 diff --git a/internal/services/skill_connected_tools.go b/internal/services/skill_connected_tools.go
 --- a/internal/services/skill_connected_tools.go
 +++ b/internal/services/skill_connected_tools.go
-@@ -199,7 +199,7 @@
- // hand-written example for the tool type.
- func hasHandWrittenToolExample(toolType string) bool {
- 	switch toolType {
+@@ -202 +202 @@
 -	case "ssh", "zabbix", "victoria_metrics", "postgresql", "grafana", "catchpoint",
 +	case "ssh", "zabbix", "victoria_metrics", "victoria_logs", "postgresql", "grafana", "catchpoint",
- 		"pagerduty", "clickhouse", "netbox", "kubernetes", "jira":
- 		return true
- 	}
 diff --git a/internal/services/skill_prompt_service.go b/internal/services/skill_prompt_service.go
 --- a/internal/services/skill_prompt_service.go
 +++ b/internal/services/skill_prompt_service.go
-@@ -532,6 +532,24 @@
- gateway_call("zabbix.api_request", {"method": "host.get", "params": {"output": ["hostid", "host"]}}, "%s")
- `+"```"+`
- `, logicalName, logicalName, logicalName, logicalName, logicalName, logicalName, logicalName)
+@@ -534,0 +535,18 @@
 +	case "victoria_logs":
 +		return fmt.Sprintf(`
 +**Read-only VictoriaLogs (LogsQL)**
@@ -1127,6 +1035,3 @@ diff --git a/internal/services/skill_prompt_service.go b/internal/services/skill
 +gateway_call("victoria_logs.field_values", {"query":"myservice", "field":"host", "start":"2026-11-14T18:00:00Z", "end":"2026-11-14T20:00:00Z"}, "%s")
 +gateway_call("victoria_logs.stats_query", {"query":"myservice | stats by(host) count(*)", "start":"2026-11-14T18:00:00Z", "end":"2026-11-14T20:00:00Z"}, "%s")
 +`, logicalName, logicalName, logicalName, logicalName, logicalName)
- 	case "victoria_metrics":
- 		return fmt.Sprintf(`
- **Parameters:**
