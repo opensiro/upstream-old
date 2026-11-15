@@ -66,6 +66,28 @@ This promotes only the technical-packet state to EXPLICIT_PATCH_HASH_MATCHED.
 It does not grant GitHub write permission, prove full source-native tests,
 waive a first-party legal gate, or demonstrate maintainer adoption.
 
+## Check the working-fork route early
+
+Once a candidate is selected for implementation, check its working-fork route
+before expanding a local experiment into target product code. First read back
+the original repository, current default branch and SHA, license, applicable
+contributor rules, and overlapping work. Then check the intended
+`opensiro-contributions` destination. For an existing fork, verify public
+visibility, direct parent, base SHA and authenticated write route. For a
+missing or unverified fork, identify the existing authorized provisioning
+stage and whether the trusted executor can run it. Record the result in the
+existing owning issue or handoff.
+
+| Condition | Next step |
+| --- | --- |
+| A product decision or native-fit gate is pending | Use a pinned disposable checkout if a bounded experiment can resolve the specific open question. Record the evidence and the next decision in the owning case. |
+| The contribution is admitted and the working-fork route is available | Use existing preparation checks to create or reuse the fork. Where the executor requires an exact initial packet, prepare and test that packet locally, pin its hash, and submit it through the existing preparation stage. Continue implementation on the verified working branch. |
+| The fork route is blocked | Record the precise blocker, owner and next action. Use `WAITING_FOR_TRUSTED_EXECUTOR` for unavailable authenticated execution. Keep reproducibility evidence in Upstream and pause implementation until the route is available. |
+
+This read-only check can run before a patch hash exists. Actual fork, branch
+and PR writes still use the exact-stage checks. Preserve existing replay
+artifacts and keep new research probes scoped to their decisive comparison.
+
 ## Single-cycle state and authority
 
 1. **Intake:** reserve one source identity (`owner/repo`); resolve it against
@@ -74,12 +96,11 @@ waive a first-party legal gate, or demonstrate maintainer adoption.
 2. **Screen:** record the four native-fit gates and any prospective VSM
    hypothesis. If no independently supported improvement exists, close the
    screen; retain the source record without creating a fake change.
-3. **Technical change:** keep the native patch, its tests and independent
-   execution receipt in Upstream. At `AWAITING_EXTERNAL`, emit a workspace
-   preparation intent pointing to the same source and patch. Reconcile
-   existing third-party PRs and fork state first. Upstream's patch is an
-   attributable evidence packet, **not the live candidate PR diff**; avoid
-   repetitive internal PRs containing only a copy of a future PR body.
+3. **Working-fork route and evidence:** run the
+   [early check](#check-the-working-fork-route-early). Record the source pin,
+   bounded reproduction and independent execution receipt in Upstream. At
+   `AWAITING_EXTERNAL`, emit the existing workspace preparation intent
+   pointing to the source and the exact initial packet required by the executor.
 4. **Autonomous fork preparation, conditionally executable:** an eligible
    five-repository wave is covered by the revocable, time-bounded
    [standing preparation mandate](STANDING_PREPARATION_AUTONOMY.md).
