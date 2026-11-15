@@ -2,11 +2,15 @@
 
 **Owner:** Upstream Contributions S1 under [#6](https://github.com/opensiro/upstream/issues/6). **Attributable parent/owner decision:** [xLagerFeuer, 2026-11-11](https://github.com/opensiro/upstream/issues/6#issuecomment-6801859676). **Machine-readable policy:** [`standing-external-publication-p1.json`](../policies/standing-external-publication-p1.json).
 
-The owner has **delegated the routine decision to submit subsequent third-party pull requests**. This prospective, continuing and revocable mandate **supersedes the 2026-11-09 exact-per-PR conversational approval requirement**. It is not limited to the historical finite Corrective cohort. An agent must **not ask the owner to approve each qualifying proposal or every five-source wave again**.
+On **2026-11-11**, the owner delegated routine third-party PR publication without per-PR prompts, superseding the earlier 2026-11-09 exact-per-PR requirement. That earlier decision remains a **historical authorization**, not an effective bypass: the **newer 2026-11-15 owner instruction** narrows it to **explicit consent for every exact outward public action**. Its previous no-prompt treatment must not be used for future publications or comments.
+
+## Current restriction — 2026-11-15 owner instruction (prospective)
+
+**The no-per-PR-prompt behavior below is historical and no longer operative for outward public actions.** The owner explicitly instructed that any external posting first be presented and approved. The current [external-public communication consent gate](EXTERNAL_PUBLIC_COMMUNICATION_GATE.md) requires **explicit current-conversation approval for each exact third-party PR, issue, comment, design question, review or other public outreach**. This narrows the earlier standing grant; it does **not** cancel preparation authority, claim a new autonomous executor or rewrite previous publication receipts. The machine policy's `approval_mode` is now `EXPLICIT_OWNER_CONFIRMATION_PER_PUBLIC_ACTION`, default `BLOCK_UNTIL_EXPLICIT_OWNER_APPROVAL`. If owner approval is missing, **do not POST**; retain a local or OpenSiro-internal draft. An earlier `continue`/batch command, standing authorization or passing tests do not constitute this approval.
 
 ## Scope and checks
 
-The authorized stage is `submit_external_pr` only for a validated, source-native contribution from an `opensiro/...` branch in an authentic **public, direct** `opensiro-contributions/<target>` fork into its matching original third-party repository. The matching fork-local PR remains the single authoritative unpublished title/body proposal. Publication defaults to **Open · Ready for review**; Draft requires a real target-permitted readiness limitation and truthful disclosure.
+Within the now-required explicit owner confirmation, the authorized stage is `submit_external_pr` only for a validated, source-native contribution from an `opensiro/...` branch in an authentic **public, direct** `opensiro-contributions/<target>` fork into its matching original third-party repository. The matching fork-local PR remains the single authoritative unpublished title/body proposal. Publication defaults to **Open · Ready for review**; Draft requires a real target-permitted readiness limitation and truthful disclosure.
 
 Before **every** publication, independently verify:
 

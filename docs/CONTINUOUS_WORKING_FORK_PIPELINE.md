@@ -5,7 +5,7 @@ fork executor [#28](https://github.com/opensiro/upstream/issues/28) under
 [#6](https://github.com/opensiro/upstream/issues/6). **Policy decision:**
 technical changes should reach the matching `opensiro-contributions` working
 fork in the same contribution cycle. The owner's [standing publication decision](STANDING_EXTERNAL_PR_PUBLICATION.md)
-now authorizes qualified external PR publication **without repeated per-PR human approval**.
+historically authorized qualified external PR publication without repeated confirmation, but the owner **narrowed it on 2026-11-15**: [exact per-action consent](EXTERNAL_PUBLIC_COMMUNICATION_GATE.md) is now required before public outreach.
 
 ## One source inventory, additive to the original 100
 
@@ -94,14 +94,18 @@ waive a first-party legal gate, or demonstrate maintainer adoption.
    automatic bound stage checks; no detached private side queue.
    The candidate diff lives on this **source-matched contributor fork**, not
    in an `opensiro/upstream` documentation or PR-body staging branch.
-5. **Fork-local proposal and standing release gate:** create a PR inside the
-   matching `opensiro-contributions/<target>` fork, from the validated
-   `opensiro/...` head to the fork's source-matched default branch. Its
-   exact title/body come from the checked code diff, latest target PR template,
-   contributor requirements and disclosure v3. Verify that fork-local PR URL,
-   unchanged head/base SHAs, final text and test receipt in the fork-local proposal.
+5. **Fork-local proposal and external release consent gate:** first draft the exact
+   target-facing title/body locally from the validated `opensiro/...` diff, the
+   latest target PR template, contributor requirements and disclosure v3.
+   **Show the owner the complete public proposal and destination; do not create
+   the publicly visible fork-local PR before exact per-action consent.**
+   After approval, create the fork-local PR from the verified code branch into
+   the source-matched `opensiro-contributions/<target>` default branch.
+   Read back its URL, unchanged head/base SHAs, final text and test receipt.
+   **A separate external original-repository PR is a separate public action
+   requiring another exact approval** even when its text and code are identical.
    Under the [independent standing publication mandate](STANDING_EXTERNAL_PR_PUBLICATION.md),
-   an authorized publisher may open a qualifying third-party PR **without another owner prompt**
+   a qualified publisher **must obtain the owner's explicit approval for the exact destination and public PR content in the current conversation** ([gate](EXTERNAL_PUBLIC_COMMUNICATION_GATE.md))
    after verifying the exact proposal, current policies and native checks; re-read both GitHub PRs afterward.
    Neither a fork-local PR nor a batch command by itself grants publication rights.
    The external maintainer alone decides acceptance or merge.
