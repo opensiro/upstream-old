@@ -1,0 +1,1037 @@
+diff --git a/mcp-gateway/internal/tools/victorialogs/victorialogs.go b/mcp-gateway/internal/tools/victorialogs/victorialogs.go
+new file mode 100644
+--- /dev/null
++++ b/mcp-gateway/internal/tools/victorialogs/victorialogs.go
+@@ -0,0 +1,252 @@
++// Package victorialogs exposes read-only, bounded VictoriaLogs LogsQL requests
++// as an independent provider integration. It does not reuse the VictoriaMetrics
++// Prometheus-response parser: log queries return NDJSON, not a vector.
++package victorialogs
++
++import (
++	"bufio"
++	"context"
++	"crypto/tls"
++	"encoding/json"
++	"fmt"
++	"io"
++	"log"
++	"net/http"
++	"net/url"
++	"strconv"
++	"strings"
++	"time"
++
++	"github.com/akmatori/mcp-gateway/internal/database"
++	"github.com/akmatori/mcp-gateway/internal/ratelimit"
++)
++
++const (
++	defaultLimit = 50
++	maxLimit     = 200
++	maxWindow    = 6 * time.Hour
++	maxBody      = 256 * 1024
++	maxQuery     = 4096
++)
++
++type Config struct {
++	URL, AuthMethod, Token, Username, Password, HeaderName, HeaderValue string
++	VerifySSL                                                           bool
++	Timeout                                                             time.Duration
++}
++type Tool struct {
++	logger  *log.Logger
++	limiter *ratelimit.Limiter
++}
++
++func New(logger *log.Logger, limiter *ratelimit.Limiter) *Tool {
++	return &Tool{logger: logger, limiter: limiter}
++}
++func setting(settings database.JSONB, key string) string {
++	v, _ := settings[key].(string)
++	return strings.TrimSpace(v)
++}
++func parseConfig(settings database.JSONB) (Config, error) {
++	c := Config{
++		URL:         setting(settings, "vl_url"),
++		AuthMethod:  setting(settings, "vl_auth_method"),
++		Token:       setting(settings, "vl_bearer_token"),
++		Username:    setting(settings, "vl_username"),
++		Password:    setting(settings, "vl_password"),
++		HeaderName:  setting(settings, "vl_header_name"),
++		HeaderValue: setting(settings, "vl_header_value"),
++		VerifySSL:   true, Timeout: 10 * time.Second,
++	}
++	if c.AuthMethod == "" {
++		c.AuthMethod = "none"
++	}
++	if v, ok := settings["vl_verify_ssl"].(bool); ok {
++		c.VerifySSL = v
++	}
++	if raw, ok := settings["vl_timeout"].(float64); ok {
++		if raw < 1 || raw > 60 {
++			return c, fmt.Errorf("vl_timeout must be between 1 and 60 seconds")
++		}
++		c.Timeout = time.Duration(raw * float64(time.Second))
++	}
++	if raw, ok := settings["vl_timeout"].(int); ok {
++		if raw < 1 || raw > 60 {
++			return c, fmt.Errorf("vl_timeout must be between 1 and 60 seconds")
++		}
++		c.Timeout = time.Duration(raw) * time.Second
++	}
++	return c, nil
++}
++func (t *Tool) Execute(ctx context.Context, incidentID, operation string, args map[string]interface{}) (string, error) {
++	logicalName, _ := args["logical_name"].(string)
++	creds, err := database.ResolveToolCredentials(ctx, incidentID, "victoria_logs", nil, logicalName)
++	if err != nil {
++		return "", fmt.Errorf("VictoriaLogs credentials unavailable: %w", err)
++	}
++	c, err := parseConfig(creds.Settings)
++	if err != nil {
++		return "", err
++	}
++	return t.execute(ctx, c, operation, args)
++}
++func value(args map[string]interface{}, name string) string {
++	s, _ := args[name].(string)
++	return strings.TrimSpace(s)
++}
++func (t *Tool) execute(ctx context.Context, c Config, operation string, args map[string]interface{}) (string, error) {
++	// Strict allowlist, not arbitrary provider API.
++	switch operation {
++	case "query", "hits", "field_names", "field_values", "stats_query":
++	default:
++		return "", fmt.Errorf("unsupported VictoriaLogs operation")
++	}
++	base, err := url.Parse(c.URL)
++	if err != nil || base == nil || base.User != nil || base.Host == "" ||
++		(base.Scheme != "https" && base.Scheme != "http") || base.RawQuery != "" || base.Fragment != "" ||
++		(base.Path != "" && base.Path != "/") || base.Opaque != "" {
++		return "", fmt.Errorf("vl_url must be an HTTP(S) origin with no path, query, fragment or credentials")
++	}
++	q := value(args, "query")
++	if q == "" || len(q) > maxQuery {
++		return "", fmt.Errorf("LogsQL query must be 1..4096 bytes")
++	}
++	start, err := time.Parse(time.RFC3339, value(args, "start"))
++	if err != nil {
++		return "", fmt.Errorf("start must be RFC3339")
++	}
++	end, err := time.Parse(time.RFC3339, value(args, "end"))
++	if err != nil {
++		return "", fmt.Errorf("end must be RFC3339")
++	}
++	if !end.After(start) || end.Sub(start) > maxWindow {
++		return "", fmt.Errorf("LogsQL time window must be positive and <= 6 hours")
++	}
++	p := url.Values{"query": {q}, "start": {start.Format(time.RFC3339)}, "end": {end.Format(time.RFC3339)}}
++	switch operation {
++	case "query":
++		limit := defaultLimit
++		if raw, ok := args["limit"]; ok {
++			switch v := raw.(type) {
++			case float64:
++				if v != float64(int(v)) {
++					return "", fmt.Errorf("limit must be an integer")
++				}
++				limit = int(v)
++			case int:
++				limit = v
++			default:
++				return "", fmt.Errorf("limit must be an integer")
++			}
++		}
++		if limit < 1 || limit > maxLimit {
++			return "", fmt.Errorf("limit must be between 1 and 200")
++		}
++		p.Set("limit", strconv.Itoa(limit))
++	case "hits":
++		step := value(args, "step")
++		duration, err := time.ParseDuration(step)
++		if err != nil || duration < time.Second || duration > time.Hour {
++			return "", fmt.Errorf("step must be between 1s and 1h")
++		}
++		p.Set("step", step)
++	case "field_values":
++		f := value(args, "field")
++		if f == "" || len(f) > 128 || strings.ContainsAny(f, "\r\n") {
++			return "", fmt.Errorf("field must be a bounded nonempty name")
++		}
++		p.Set("field", f)
++		p.Set("limit", "200")
++	case "field_names":
++		// The official field_names endpoint does not promise a limit parameter.
++	case "stats_query":
++		if !strings.Contains(strings.ToLower(q), "| stats") {
++			return "", fmt.Errorf("stats_query requires a LogsQL stats pipe")
++		}
++		p.Set("time", end.Format(time.RFC3339))
++	}
++	base.Path = "/select/logsql/" + operation
++	if t.limiter != nil {
++		if err := t.limiter.Wait(ctx); err != nil {
++			return "", fmt.Errorf("VictoriaLogs rate limit: %w", err)
++		}
++	}
++	request, err := http.NewRequestWithContext(ctx, http.MethodPost, base.String(), strings.NewReader(p.Encode()))
++	if err != nil {
++		return "", err
++	}
++	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
++	switch c.AuthMethod {
++	case "none":
++	case "bearer_token":
++		if c.Token == "" {
++			return "", fmt.Errorf("vl_bearer_token required for bearer auth")
++		}
++		request.Header.Set("Authorization", "Bearer "+c.Token)
++	case "basic_auth":
++		if c.Username == "" {
++			return "", fmt.Errorf("vl_username required for basic auth")
++		}
++		request.SetBasicAuth(c.Username, c.Password)
++	case "custom_header":
++		if !strings.HasPrefix(strings.ToLower(c.HeaderName), "x-") || c.HeaderValue == "" ||
++			strings.ContainsAny(c.HeaderName, "\r\n :") ||
++			strings.ContainsAny(c.HeaderValue, "\r\n") {
++			return "", fmt.Errorf("custom header requires an X-* name and value")
++		}
++		request.Header.Set(c.HeaderName, c.HeaderValue)
++	default:
++		return "", fmt.Errorf("invalid vl_auth_method")
++	}
++	transport := &http.Transport{DisableKeepAlives: true, Proxy: nil}
++	if !c.VerifySSL {
++		transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
++	} //nolint:gosec // explicit owner setting only
++	timeout := c.Timeout
++	if timeout <= 0 || timeout > 60*time.Second {
++		timeout = 10 * time.Second
++	}
++	client := &http.Client{Timeout: timeout, Transport: transport,
++		CheckRedirect: func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse }}
++	resp, err := client.Do(request)
++	if err != nil {
++		return "", fmt.Errorf("VictoriaLogs request failed: %w", err)
++	}
++	defer resp.Body.Close()
++	if resp.StatusCode != http.StatusOK {
++		return "", fmt.Errorf("VictoriaLogs HTTP %d", resp.StatusCode) // never leak auth/proxy error body
++	}
++	data, err := io.ReadAll(io.LimitReader(resp.Body, maxBody+1))
++	if err != nil {
++		return "", err
++	}
++	if len(data) > maxBody {
++		return "", fmt.Errorf("VictoriaLogs response exceeds 256KiB")
++	}
++	if operation == "query" {
++		scanner := bufio.NewScanner(strings.NewReader(string(data)))
++		scanner.Buffer(make([]byte, 1024), maxBody)
++		result := make([]json.RawMessage, 0, defaultLimit)
++		max, _ := strconv.Atoi(p.Get("limit"))
++		for scanner.Scan() {
++			if len(result) >= max {
++				return "", fmt.Errorf("VictoriaLogs returned more lines than requested")
++			}
++			line := scanner.Bytes()
++			if !json.Valid(line) || len(line) == 0 || line[0] != '{' {
++				return "", fmt.Errorf("invalid VictoriaLogs NDJSON")
++			}
++			result = append(result, append(json.RawMessage(nil), line...))
++		}
++		if err := scanner.Err(); err != nil {
++			return "", fmt.Errorf("VictoriaLogs NDJSON: %w", err)
++		}
++		output, err := json.Marshal(result)
++		return string(output), err
++	}
++	if !json.Valid(data) {
++		return "", fmt.Errorf("invalid VictoriaLogs JSON response")
++	}
++	// The other four endpoints return JSON, not NDJSON. Retain the provider
++	// shape so an SRE agent can inspect hits / stats without lossy conversion.
++	return string(data), nil
++}
+diff --git a/mcp-gateway/internal/tools/victorialogs/victorialogs_test.go b/mcp-gateway/internal/tools/victorialogs/victorialogs_test.go
+new file mode 100644
+--- /dev/null
++++ b/mcp-gateway/internal/tools/victorialogs/victorialogs_test.go
+@@ -0,0 +1,249 @@
++package victorialogs
++
++import (
++	"context"
++	"encoding/json"
++	"fmt"
++	"io"
++	"log"
++	"net/http"
++	"net/http/httptest"
++	"strings"
++	"testing"
++	"time"
++
++	"github.com/akmatori/mcp-gateway/internal/database"
++	"gorm.io/driver/sqlite"
++	"gorm.io/gorm"
++)
++
++const start = "2026-11-14T18:00:00Z"
++const end = "2026-11-14T20:00:00Z"
++
++func queryArgs() map[string]interface{} {
++	return map[string]interface{}{"query": "myservice", "start": start, "end": end, "limit": 2}
++}
++func TestNativeVictoriaLogsFiveOperationsSourceFirst(t *testing.T) {
++	calls := map[string]int{}
++	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		_ = r.ParseForm()
++		calls[r.URL.Path]++
++		if r.Method != http.MethodPost || r.FormValue("query") == "" || r.FormValue("start") != start || r.FormValue("end") != end {
++			t.Errorf("unbounded or invalid query: method=%s params=%v", r.Method, r.Form)
++		}
++		switch r.URL.Path {
++		case "/select/logsql/query":
++			if r.FormValue("limit") != "2" {
++				t.Errorf("limit missing")
++			}
++			_, _ = fmt.Fprint(w, `{"_time":"2026-11-14T19:00:00Z","host":"node-a","_msg":"systemd crash loop: exit 1"}
++{"_time":"2026-11-14T19:01:00Z","host":"node-a","_msg":"service restarted"}
++`)
++		case "/select/logsql/hits":
++			if r.FormValue("step") != "1m" {
++				t.Errorf("step absent")
++			}
++			_, _ = fmt.Fprint(w, `{"hits":[{"fields":{},"timestamps":["2026-11-14T19:00:00Z"],"values":[2],"total":2}]}`)
++		case "/select/logsql/field_names":
++			_, _ = fmt.Fprint(w, `{"values":[{"value":"host","hits":2}]}`)
++		case "/select/logsql/field_values":
++			if r.FormValue("field") != "host" {
++				t.Errorf("field absent")
++			}
++			_, _ = fmt.Fprint(w, `{"values":[{"value":"node-a","hits":2}]}`)
++		case "/select/logsql/stats_query":
++			if r.FormValue("time") != end {
++				t.Errorf("stats time absent")
++			}
++			_, _ = fmt.Fprint(w, `{"status":"success","data":{"resultType":"vector","result":[{"metric":{"host":"node-a"},"value":[1794686400,"2"]}]}}`)
++		default:
++			t.Errorf("unexpected path %s", r.URL.Path)
++			w.WriteHeader(404)
++		}
++	}))
++	defer server.Close()
++	tool := New(log.New(io.Discard, "", 0), nil)
++	config := Config{URL: server.URL, VerifySSL: true, AuthMethod: "none", Timeout: time.Second}
++	for _, op := range []string{"query", "hits", "field_names", "field_values", "stats_query"} {
++		t.Run(op, func(t *testing.T) {
++			args := queryArgs()
++			args["field"] = "host"
++			args["step"] = "1m"
++			if op == "stats_query" {
++				args["query"] = "myservice | stats by(host) count(*)"
++			}
++			value, err := tool.execute(context.Background(), config, op, args)
++			if err != nil {
++				t.Fatal(err)
++			}
++			if !json.Valid([]byte(value)) {
++				t.Fatalf("invalid returned JSON: %q", value)
++			}
++			if op == "query" {
++				var rows []map[string]interface{}
++				if err := json.Unmarshal([]byte(value), &rows); err != nil {
++					t.Fatal(err)
++				}
++				if len(rows) != 2 || rows[0]["host"] != "node-a" || !strings.Contains(rows[0]["_msg"].(string), "crash loop") {
++					t.Fatalf("missing new journal evidence %s", value)
++				}
++			}
++		})
++	}
++	if len(calls) != 5 {
++		t.Fatalf("native five operator functions did not all request distinct LogsQL endpoints: %+v", calls)
++	}
++	t.Log("new user task: read actual LogsQL journal crash loop through native, bounded tool; all five requested endpoints wired")
++}
++func TestNativeVictoriaLogsBoundsAndHTTPFailures(t *testing.T) {
++	requests := 0
++	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		requests++
++		_ = r.ParseForm()
++		switch r.FormValue("query") {
++		case "badjson":
++			_, _ = fmt.Fprint(w, "{not-json")
++		case "too_many":
++			_, _ = fmt.Fprint(w, `{"_time":"a","_msg":"a"}`+"\n"+`{"_time":"b","_msg":"b"}`+"\n")
++		case "large":
++			_, _ = fmt.Fprint(w, strings.Repeat("a", maxBody+1))
++		case "error_credential":
++			w.WriteHeader(503)
++			_, _ = fmt.Fprint(w, "secret_credential_should_not_leak")
++		default:
++			_, _ = fmt.Fprint(w, `{"_time":"a","_msg":"ok"}`+"\n")
++		}
++	}))
++	defer server.Close()
++	tool := New(log.New(io.Discard, "", 0), nil)
++	c := Config{URL: server.URL, AuthMethod: "none", VerifySSL: true, Timeout: time.Second}
++	cases := []struct {
++		name, op string
++		cfg      Config
++		args     map[string]interface{}
++	}{
++		{"missing_url", "query", Config{AuthMethod: "none"}, queryArgs()},
++		{"invalid_path", "query", Config{URL: server.URL + "/admin", AuthMethod: "none"}, queryArgs()},
++		{"invalid_scheme", "query", Config{URL: "file:///etc/passwd", AuthMethod: "none"}, queryArgs()},
++		{"user_info", "query", Config{URL: "http://name:pass@localhost:99", AuthMethod: "none"}, queryArgs()},
++		{"unknown_op", "delete", c, queryArgs()},
++		{"missing_query", "query", c, map[string]interface{}{"start": start, "end": end}},
++		{"time_inverted", "query", c, map[string]interface{}{"start": end, "end": start, "query": "x"}},
++		{"time_too_long", "query", c, map[string]interface{}{"start": "2026-11-13T00:00:00Z", "end": end, "query": "x"}},
++		{"bad_timestamp", "query", c, map[string]interface{}{"start": "not-date", "end": end, "query": "x"}},
++		{"limit_huge", "query", c, map[string]interface{}{"start": start, "end": end, "query": "x", "limit": 10000}},
++		{"limit_fraction", "query", c, map[string]interface{}{"start": start, "end": end, "query": "x", "limit": 1.2}},
++		{"step_invalid", "hits", c, map[string]interface{}{"start": start, "end": end, "query": "x", "step": "-2s"}},
++		{"field_missing", "field_values", c, queryArgs()},
++		{"stats_pipe_required", "stats_query", c, queryArgs()},
++		{"bearer_missing", "query", Config{URL: server.URL, AuthMethod: "bearer_token"}, queryArgs()},
++		{"bad_json", "query", c, map[string]interface{}{"start": start, "end": end, "query": "badjson"}},
++		{"too_many_lines", "query", c, map[string]interface{}{"start": start, "end": end, "query": "too_many", "limit": 1}},
++		{"too_large", "query", c, map[string]interface{}{"start": start, "end": end, "query": "large"}},
++		{"error_no_secrets", "query", c, map[string]interface{}{"start": start, "end": end, "query": "error_credential"}},
++	}
++	for _, tc := range cases {
++		t.Run(tc.name, func(t *testing.T) {
++			_, err := tool.execute(context.Background(), tc.cfg, tc.op, tc.args)
++			if err == nil {
++				t.Fatal("unsafe input/response accepted")
++			}
++			if strings.Contains(err.Error(), "secret_credential_should_not_leak") {
++				t.Fatalf("secret response leaked %s", err)
++			}
++		})
++	}
++	if requests != 4 {
++		t.Fatalf("unsafe requests passed input validation: request count %d", requests)
++	}
++	t.Log("bounded LogsQL fail-closed: invalid time/limit, URL, credentials, JSON, oversized body and errors rejected")
++}
++func TestNativeVictoriaLogsAuthAndNoRedirect(t *testing.T) {
++	seen := []string{}
++	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		if r.FormValue("query") == "redirect" {
++			w.Header().Set("Location", "https://example.org")
++			w.WriteHeader(302)
++			return
++		}
++		seen = append(seen, r.Header.Get("Authorization")+"|"+r.Header.Get("X-Test-Token"))
++		_, _ = fmt.Fprint(w, `{"_time":"a","_msg":"ok"}`)
++	}))
++	defer server.Close()
++	tool := New(log.New(io.Discard, "", 0), nil)
++	c := Config{URL: server.URL, AuthMethod: "bearer_token", Token: "research-token", VerifySSL: true, Timeout: time.Second}
++	_, err := tool.execute(context.Background(), c, "query", queryArgs())
++	if err != nil || seen[0] != "Bearer research-token|" {
++		t.Fatalf("bearer auth %q %v", seen, err)
++	}
++	c.AuthMethod = "basic_auth"
++	c.Username = "tester"
++	c.Password = "pw"
++	_, err = tool.execute(context.Background(), c, "query", queryArgs())
++	if err != nil || seen[1] != "Basic dGVzdGVyOnB3|" {
++		t.Fatalf("basic auth %q %v", seen, err)
++	}
++	c.AuthMethod = "custom_header"
++	c.HeaderName = "X-Test-Token"
++	c.HeaderValue = "value"
++	_, err = tool.execute(context.Background(), c, "query", queryArgs())
++	if err != nil || seen[2] != "|value" {
++		t.Fatalf("custom header %q %v", seen, err)
++	}
++	c.HeaderName = "Authorization"
++	if _, err = tool.execute(context.Background(), c, "query", queryArgs()); err == nil {
++		t.Fatal("custom Authorization override accepted")
++	}
++	c.AuthMethod = "none"
++	bad := queryArgs()
++	bad["query"] = "redirect"
++	_, err = tool.execute(context.Background(), c, "query", bad)
++	if err == nil || !strings.Contains(err.Error(), "302") {
++		t.Fatalf("redirect was followed %v", err)
++	}
++	t.Log("bearer/basic/custom-header modes, rejected cross-origin redirects")
++}
++func TestNativeVictoriaLogsFirstPartyCredentialResolver(t *testing.T) {
++	prev := database.DB
++	db, err := gorm.Open(sqlite.Open("file:vl-resolver?mode=memory&cache=shared"), &gorm.Config{})
++	if err != nil {
++		t.Fatal(err)
++	}
++	database.DB = db
++	t.Cleanup(func() { database.DB = prev; conn, _ := db.DB(); _ = conn.Close() })
++	if err := db.AutoMigrate(&database.ToolType{}, &database.ToolInstance{}, &database.Skill{}); err != nil {
++		t.Fatal(err)
++	}
++	ty := database.ToolType{Name: "victoria_logs", Description: "LogsQL"}
++	if err := db.Create(&ty).Error; err != nil {
++		t.Fatal(err)
++	}
++	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
++		_, _ = fmt.Fprint(w, `{"_time":"2026-11-14T19:00:00Z","_msg":"journal unavailable to metrics"}`+"\n")
++	}))
++	defer server.Close()
++	instance := database.ToolInstance{ToolTypeID: ty.ID, Name: "VictoriaLogs local", LogicalName: "vl-site-a", Enabled: true,
++		Settings: database.JSONB{"vl_url": server.URL, "vl_auth_method": "none"}}
++	if err := db.Create(&instance).Error; err != nil {
++		t.Fatal(err)
++	}
++	tool := New(log.New(io.Discard, "", 0), nil)
++	args := queryArgs()
++	args["logical_name"] = "vl-site-a"
++	out, err := tool.Execute(context.Background(), "incident-1", "query", args)
++	if err != nil || !strings.Contains(out, "journal unavailable to metrics") {
++		t.Fatalf("original DB credential lookup → LogsQL native result: %q, %v", out, err)
++	}
++	bad := queryArgs()
++	bad["logical_name"] = "nonexistent"
++	if _, err := tool.Execute(context.Background(), "incident-1", "query", bad); err == nil {
++		t.Fatal("invalid instance name accepted")
++	}
++	if err := db.Model(&instance).Update("enabled", false).Error; err != nil {
++		t.Fatal(err)
++	}
++	if _, err := tool.Execute(context.Background(), "incident-1", "query", args); err == nil {
++		t.Fatal("disabled instance allowed")
++	}
++	t.Log("original DB enabled ToolInstance + logical_name credential path integrates native read-only LogsQL tool; disabled/restricted names fail")
++}
+diff --git a/mcp-gateway/internal/tools/victorialogs/victorialogs_live_test.go b/mcp-gateway/internal/tools/victorialogs/victorialogs_live_test.go
+new file mode 100644
+--- /dev/null
++++ b/mcp-gateway/internal/tools/victorialogs/victorialogs_live_test.go
+@@ -0,0 +1,140 @@
++package victorialogs
++
++import (
++	"context"
++	"encoding/json"
++	"os"
++	"strings"
++	"testing"
++	"time"
++)
++
++// The explicitly opt-in live test uses a real, isolated VictoriaLogs server
++// preloaded with exactly 3 offline research lines:
++//
++//	node-a: one crash loop and one restart; node-b: one stable service.
++//
++// It is skipped under ordinary upstream CI, where no VictoriaLogs instance
++// should be assumed. See the reproducibility receipt for the pinned server.
++func TestVictoriaLogsOfficialV154FiveFunctions(t *testing.T) {
++	origin := os.Getenv("AKMATORI_VL_INTEGRATION_URL")
++	if origin == "" {
++		t.Skip("set AKMATORI_VL_INTEGRATION_URL to an isolated, preseeded VictoriaLogs test instance")
++	}
++	config := Config{URL: origin, AuthMethod: "none", VerifySSL: true, Timeout: 5 * time.Second}
++	tool := New(nil, nil)
++	base := map[string]interface{}{
++		"query": "myservice", "start": "2026-11-14T18:00:00Z", "end": "2026-11-14T20:00:00Z",
++	}
++	mk := func() map[string]interface{} {
++		c := map[string]interface{}{}
++		for k, v := range base {
++			c[k] = v
++		}
++		return c
++	}
++	rowsArgs := mk()
++	rowsArgs["limit"] = 10
++	raw, err := tool.execute(context.Background(), config, "query", rowsArgs)
++	if err != nil {
++		t.Fatalf("live official LogsQL query: %v", err)
++	}
++	var rows []map[string]interface{}
++	if err := json.Unmarshal([]byte(raw), &rows); err != nil {
++		t.Fatal(err)
++	}
++	if len(rows) != 3 {
++		t.Fatalf("live query expected three journal entries, got %d: %s", len(rows), raw)
++	}
++	crashes := 0
++	for _, row := range rows {
++		if strings.Contains(row["_msg"].(string), "crash loop") {
++			crashes++
++		}
++	}
++	if crashes != 1 {
++		t.Fatalf("real provider did not return a crash-loop cause: %+v", rows)
++	}
++	hitsArgs := mk()
++	hitsArgs["step"] = "5m"
++	hitsRaw, err := tool.execute(context.Background(), config, "hits", hitsArgs)
++	if err != nil {
++		t.Fatalf("live official hits: %v", err)
++	}
++	var hits struct {
++		Hits []struct {
++			Total int `json:"total"`
++		} `json:"hits"`
++	}
++	if err := json.Unmarshal([]byte(hitsRaw), &hits); err != nil {
++		t.Fatal(err)
++	}
++	if len(hits.Hits) != 1 || hits.Hits[0].Total != 3 {
++		t.Fatalf("live hits mismatch %s", hitsRaw)
++	}
++	fieldsRaw, err := tool.execute(context.Background(), config, "field_names", mk())
++	if err != nil {
++		t.Fatalf("live field_names: %v", err)
++	}
++	if !strings.Contains(fieldsRaw, `"value":"host"`) {
++		t.Fatalf("real field schema missing host: %s", fieldsRaw)
++	}
++	valsArgs := mk()
++	valsArgs["field"] = "host"
++	valsRaw, err := tool.execute(context.Background(), config, "field_values", valsArgs)
++	if err != nil {
++		t.Fatalf("live field_values: %v", err)
++	}
++	var values struct {
++		Values []struct {
++			Value string `json:"value"`
++			Hits  int    `json:"hits"`
++		} `json:"values"`
++	}
++	if err := json.Unmarshal([]byte(valsRaw), &values); err != nil {
++		t.Fatal(err)
++	}
++	count := map[string]int{}
++	for _, v := range values.Values {
++		count[v.Value] = v.Hits
++	}
++	if count["node-a"] != 2 || count["node-b"] != 1 {
++		t.Fatalf("live host distributions %+v", count)
++	}
++	statsArgs := mk()
++	statsArgs["query"] = "myservice | stats by(host) count(*)"
++	statsRaw, err := tool.execute(context.Background(), config, "stats_query", statsArgs)
++	if err != nil {
++		t.Fatalf("live stats_query: %v", err)
++	}
++	var stats struct {
++		Status string `json:"status"`
++		Data   struct {
++			Result []struct {
++				Metric map[string]string `json:"metric"`
++				Value  []interface{}     `json:"value"`
++			} `json:"result"`
++		} `json:"data"`
++	}
++	if err := json.Unmarshal([]byte(statsRaw), &stats); err != nil {
++		t.Fatal(err)
++	}
++	if stats.Status != "success" || len(stats.Data.Result) != 2 {
++		t.Fatalf("live stats unexpected: %s", statsRaw)
++	}
++	totals := map[string]string{}
++	for _, row := range stats.Data.Result {
++		if len(row.Value) != 2 {
++			t.Fatalf("invalid stats sample: %s", statsRaw)
++		}
++		v, ok := row.Value[1].(string)
++		if !ok {
++			t.Fatalf("stats sample isn't a string: %s", statsRaw)
++		}
++		totals[row.Metric["host"]] = v
++	}
++	if totals["node-a"] != "2" || totals["node-b"] != "1" {
++		t.Fatalf("unexpected real stats %+v", totals)
++	}
++	t.Log("official pinned VictoriaLogs: all five source-native functions returned consistent logs, hits, field names, field values and stats; node-a crash-loop discriminated")
++}
+diff --git a/mcp-gateway/internal/tools/registry_victorialogs_test.go b/mcp-gateway/internal/tools/registry_victorialogs_test.go
+new file mode 100644
+--- /dev/null
++++ b/mcp-gateway/internal/tools/registry_victorialogs_test.go
+@@ -0,0 +1,128 @@
++package tools
++
++import (
++	"bytes"
++	"encoding/json"
++	"fmt"
++	"io"
++	"log"
++	"net/http"
++	"net/http/httptest"
++	"path/filepath"
++	"strings"
++	"testing"
++	"time"
++
++	"github.com/akmatori/mcp-gateway/internal/auth"
++	"github.com/akmatori/mcp-gateway/internal/database"
++	"github.com/akmatori/mcp-gateway/internal/mcp"
++	"gorm.io/driver/sqlite"
++	"gorm.io/gorm"
++)
++
++func TestVictoriaLogsRegistryAndOriginalMetricsUnchanged(t *testing.T) {
++	logger := log.New(io.Discard, "", 0)
++	server := mcp.NewServer("akmatori-test", "1.0", logger)
++	registry := NewRegistry(server, logger)
++	registry.registerVictoriaLogsTools()
++	registry.registerVictoriaMetricsTools()
++	defer registry.Stop()
++	got := registry.ListToolsByType("victoria_logs")
++	if len(got) != 5 {
++		t.Fatalf("new LogsQL namespace has %d operations, want 5", len(got))
++	}
++	expected := map[string]bool{"query": true, "hits": true, "field_names": true, "field_values": true, "stats_query": true}
++	for _, item := range got {
++		if !expected[strings.TrimPrefix(item.Name, "victoria_logs.")] {
++			t.Fatalf("unapproved tool %s", item.Name)
++		}
++		details, ok := registry.GetToolDetail(item.Name)
++		if !ok || details.ToolType != "victoria_logs" || len(details.InputSchema.Required) < 3 {
++			t.Fatalf("unavailable native registry details: %+v", details)
++		}
++	}
++	if len(registry.ListToolsByType("victoria_metrics")) != 5 {
++		t.Fatal("existing VictoriaMetrics tools changed")
++	}
++	if !builtInToolNamespaces["victoria_logs"] {
++		t.Fatal("new namespace could be impersonated via MCP proxy")
++	}
++}
++
++func TestVictoriaLogsRegisteredJSONRPCRespectsAuthorization(t *testing.T) {
++	original := database.DB
++	db, err := gorm.Open(sqlite.Open(filepath.Join(t.TempDir(), "gateway.sqlite")), &gorm.Config{})
++	if err != nil {
++		t.Fatal(err)
++	}
++	database.DB = db
++	t.Cleanup(func() { database.DB = original; conn, _ := db.DB(); _ = conn.Close() })
++	if err := db.AutoMigrate(&database.ToolType{}, &database.ToolInstance{}, &database.Skill{}); err != nil {
++		t.Fatal(err)
++	}
++	ty := database.ToolType{Name: "victoria_logs"}
++	if err := db.Create(&ty).Error; err != nil {
++		t.Fatal(err)
++	}
++	backendCalls := 0
++	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		backendCalls++
++		if r.URL.Path != "/select/logsql/query" {
++			t.Errorf("backend wrong path %q", r.URL.Path)
++		}
++		if r.Header.Get("Authorization") != "Bearer local-test-token" {
++			t.Errorf("missing configured backend auth")
++		}
++		_, _ = fmt.Fprint(w, `{"_time":"2026-11-14T19:00:00Z","_msg":"service crash loop","host":"node-a"}`+"\n")
++	}))
++	defer upstream.Close()
++	instance := database.ToolInstance{ToolTypeID: ty.ID, Name: "Logs local", LogicalName: "logs-local", Enabled: true,
++		Settings: database.JSONB{"vl_url": upstream.URL, "vl_auth_method": "bearer_token", "vl_bearer_token": "local-test-token"}}
++	if err := db.Create(&instance).Error; err != nil {
++		t.Fatal(err)
++	}
++	logger := log.New(io.Discard, "", 0)
++	server := mcp.NewServer("akmatori-test", "1.0", logger)
++	registry := NewRegistry(server, logger)
++	registry.registerVictoriaLogsTools()
++	defer registry.Stop()
++	authorizer := auth.NewAuthorizer(time.Hour)
++	defer authorizer.Stop()
++	server.SetAuthorizer(authorizer)
++	args := map[string]interface{}{"query": "myservice", "start": "2026-11-14T18:00:00Z", "end": "2026-11-14T20:00:00Z", "limit": 2, "logical_name": "logs-local"}
++	doCall := func(allowlist interface{}) map[string]interface{} {
++		t.Helper()
++		p := map[string]interface{}{"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": map[string]interface{}{
++			"name": "victoria_logs.query", "arguments": args}}
++		raw, _ := json.Marshal(p)
++		req := httptest.NewRequest(http.MethodPost, "/mcp", bytes.NewReader(raw))
++		req.Header.Set("Content-Type", "application/json")
++		req.Header.Set("X-Incident-ID", "case-48")
++		header, _ := json.Marshal(allowlist)
++		req.Header.Set("X-Tool-Allowlist", string(header))
++		rec := httptest.NewRecorder()
++		server.HandleHTTP(rec, req)
++		var result map[string]interface{}
++		if err := json.Unmarshal(rec.Body.Bytes(), &result); err != nil {
++			t.Fatalf("invalid MCP response: %d: %s, %v", rec.Code, rec.Body.String(), err)
++		}
++		return result
++	}
++	// The original gateway authorizer must enforce an explicit deny-all list.
++	deny := doCall([]interface{}{})
++	if deny["error"] == nil {
++		t.Fatalf("explicit empty tool allowlist ignored: %+v", deny)
++	}
++	if backendCalls != 0 {
++		t.Fatalf("unauthorized call reached HTTP backend: %d", backendCalls)
++	}
++	allow := doCall([]auth.AllowlistEntry{{InstanceID: instance.ID, LogicalName: instance.LogicalName, ToolType: "victoria_logs"}})
++	if allow["error"] != nil {
++		t.Fatalf("authorized new LogsQL tool rejected: %+v", allow)
++	}
++	body, _ := json.Marshal(allow)
++	if backendCalls != 1 || !strings.Contains(string(body), "service crash loop") {
++		t.Fatalf("native gateway did not deliver new user log evidence calls=%d response=%s", backendCalls, body)
++	}
++	t.Log("normal JSON-RPC tools/call with first-party per-incident tool allowlist: zero unauthorized backend calls, one permitted LogsQL request")
++}
+diff --git a/mcp-gateway/internal/tools/registry.go b/mcp-gateway/internal/tools/registry.go
+--- a/mcp-gateway/internal/tools/registry.go
++++ b/mcp-gateway/internal/tools/registry.go
+@@ -21,2 +20,0 @@
+-	"github.com/akmatori/mcp-gateway/internal/tools/knowledge"
+-	"github.com/akmatori/mcp-gateway/internal/tools/telegram"
+@@ -27,0 +26 @@
++	"github.com/akmatori/mcp-gateway/internal/tools/knowledge"
+@@ -32,0 +32,2 @@
++	"github.com/akmatori/mcp-gateway/internal/tools/telegram"
++	"github.com/akmatori/mcp-gateway/internal/tools/victorialogs"
+@@ -40,0 +42,2 @@
++	VLRatePerSecond         = 10 // requests per second
++	VLRateBurst             = 20
+@@ -66,0 +70 @@
++	vlTool          *victorialogs.Tool
+@@ -129,0 +134 @@
++	r.registerVictoriaLogsTools()
+@@ -251,0 +257 @@
++	"victoria_logs":    true,
+@@ -1085,0 +1092,44 @@
++// registerVictoriaLogsTools adds a separate read-only LogsQL namespace.
++// This does not extend the VictoriaMetrics PromQL protocol.
++func (r *Registry) registerVictoriaLogsTools() {
++	r.vlTool = victorialogs.New(r.logger, ratelimit.New(VLRatePerSecond, VLRateBurst))
++	type specification struct {
++		name, desc string
++		props      map[string]mcp.Property
++		required   []string
++	}
++	base := map[string]mcp.Property{
++		"query":        {Type: "string", Description: "LogsQL expression (required; max 4096 bytes)"},
++		"start":        {Type: "string", Description: "RFC3339 UTC or offset time; required"},
++		"end":          {Type: "string", Description: "RFC3339 end; max 6 hour window; required"},
++		"logical_name": {Type: "string", Description: "Optional configured victoria_logs instance name"},
++	}
++	// Map cloning avoids shared schema mutation across tools.
++	mk := func(extra map[string]mcp.Property) map[string]mcp.Property {
++		props := make(map[string]mcp.Property, len(base)+len(extra))
++		for k, v := range base {
++			props[k] = v
++		}
++		for k, v := range extra {
++			props[k] = v
++		}
++		return props
++	}
++	specs := []specification{
++		{"query", "Read bounded VictoriaLogs log messages (LogsQL → NDJSON records)", mk(map[string]mcp.Property{"limit": {Type: "integer", Description: "Log records, 1..200 (default 50)"}}), []string{"query", "start", "end"}},
++		{"hits", "Count matching LogsQL hits grouped by step", mk(map[string]mcp.Property{"step": {Type: "string", Description: "Bucket width, 1s..1h"}}), []string{"query", "start", "end", "step"}},
++		{"field_names", "Discover field names present in time-bounded logs", mk(nil), []string{"query", "start", "end"}},
++		{"field_values", "Discover bounded values of a field across matching logs", mk(map[string]mcp.Property{"field": {Type: "string", Description: "Field name (required)"}}), []string{"query", "start", "end", "field"}},
++		{"stats_query", "Evaluate a LogsQL query containing a stats pipe", mk(nil), []string{"query", "start", "end"}},
++	}
++	for _, spec := range specs {
++		name := spec.name
++		r.server.RegisterTool(mcp.Tool{
++			Name: "victoria_logs." + name, Description: spec.desc,
++			InputSchema: mcp.InputSchema{Type: "object", Properties: spec.props, Required: spec.required},
++		}, func(ctx context.Context, incidentID string, args map[string]interface{}) (interface{}, error) {
++			return r.vlTool.Execute(ctx, incidentID, name, args)
++		})
++	}
++}
++
+diff --git a/mcp-gateway/internal/tools/schemas.go b/mcp-gateway/internal/tools/schemas.go
+--- a/mcp-gateway/internal/tools/schemas.go
++++ b/mcp-gateway/internal/tools/schemas.go
+@@ -61,0 +62 @@
++		"victoria_logs":    getVictoriaLogsSchema(),
+@@ -379,0 +381,30 @@
++// getVictoriaLogsSchema presents a native configuration form to the UI.
++func getVictoriaLogsSchema() ToolTypeSchema {
++	return ToolTypeSchema{
++		Name:        "victoria_logs",
++		Description: "VictoriaLogs read-only LogsQL logs, hits and field discovery (separate from VictoriaMetrics).",
++		Version:     "1.0.0",
++		SettingsSchema: SettingsSchema{
++			Type: "object", Required: []string{"vl_url"},
++			Properties: map[string]PropertySchema{
++				"vl_url":          {Type: "string", Description: "VictoriaLogs HTTP(S) origin, without path or query", Example: "https://logs.example.com"},
++				"vl_auth_method":  {Type: "string", Description: "Authentication method", Enum: []string{"none", "bearer_token", "basic_auth", "custom_header"}, Default: "none"},
++				"vl_bearer_token": {Type: "string", Description: "Bearer token for bearer_token mode", Secret: true},
++				"vl_username":     {Type: "string", Description: "Basic authentication username", Advanced: true},
++				"vl_password":     {Type: "string", Description: "Basic authentication password", Secret: true, Advanced: true},
++				"vl_header_name":  {Type: "string", Description: "Custom X-* HTTP authentication header name", Advanced: true},
++				"vl_header_value": {Type: "string", Description: "Custom authentication header value", Secret: true, Advanced: true},
++				"vl_verify_ssl":   {Type: "boolean", Description: "Verify TLS certificate", Default: true, Advanced: true},
++				"vl_timeout":      {Type: "integer", Description: "HTTP request deadline, seconds", Default: 10, Minimum: intPtr(1), Maximum: intPtr(60), Advanced: true},
++			},
++		},
++		Functions: []ToolFunction{
++			{Name: "query", Description: "Retrieve bounded log records with LogsQL", Parameters: "query, start, end required; limit 1..200 optional", Returns: "JSON array of NDJSON log objects"},
++			{Name: "hits", Description: "Count matching logs in time buckets", Parameters: "query, start, end, step required", Returns: "VictoriaLogs hits JSON"},
++			{Name: "field_names", Description: "Discover matching log fields", Parameters: "query, start, end required", Returns: "VictoriaLogs values JSON"},
++			{Name: "field_values", Description: "Read bounded values for a log field", Parameters: "query, start, end, field required", Returns: "VictoriaLogs values JSON"},
++			{Name: "stats_query", Description: "Evaluate LogsQL statistics expression", Parameters: "query containing | stats, start, end required", Returns: "Prometheus-compatible JSON"},
++		},
++	}
++}
++
+diff --git a/mcp-gateway/internal/tools/schemas_test.go b/mcp-gateway/internal/tools/schemas_test.go
+--- a/mcp-gateway/internal/tools/schemas_test.go
++++ b/mcp-gateway/internal/tools/schemas_test.go
+@@ -619 +619 @@
+-	expected := []string{"ssh", "zabbix", "victoria_metrics", "catchpoint", "postgresql", "grafana", "clickhouse", "pagerduty", "netbox", "kubernetes", "jira"}
++	expected := []string{"ssh", "zabbix", "victoria_metrics", "victoria_logs", "catchpoint", "postgresql", "grafana", "clickhouse", "pagerduty", "netbox", "kubernetes", "jira"}
+@@ -1228,0 +1229,34 @@
++
++func TestVictoriaLogsSchema_SecurityAndToolParity(t *testing.T) {
++	schema, ok := GetToolSchema("victoria_logs")
++	if !ok || schema.Name != "victoria_logs" || schema.Version != "1.0.0" {
++		t.Fatalf("new tool schema absent: %+v", schema)
++	}
++	if len(schema.SettingsSchema.Required) != 1 || schema.SettingsSchema.Required[0] != "vl_url" {
++		t.Fatalf("missing URL required setting")
++	}
++	props := schema.SettingsSchema.Properties
++	for _, key := range []string{"vl_url", "vl_auth_method", "vl_bearer_token", "vl_username", "vl_password", "vl_header_name", "vl_header_value", "vl_verify_ssl", "vl_timeout"} {
++		if _, ok := props[key]; !ok {
++			t.Fatalf("missing UI settings %s", key)
++		}
++	}
++	for _, key := range []string{"vl_bearer_token", "vl_password", "vl_header_value"} {
++		if !props[key].Secret {
++			t.Fatalf("%s must be secret in UI", key)
++		}
++	}
++	expected := []string{"query", "hits", "field_names", "field_values", "stats_query"}
++	if len(schema.Functions) != len(expected) {
++		t.Fatalf("expected five LogsQL operations, got %d", len(schema.Functions))
++	}
++	for i, fn := range schema.Functions {
++		if fn.Name != expected[i] {
++			t.Fatalf("wrong new operation[%d] %s", i, fn.Name)
++		}
++	}
++	original, ok := GetToolSchema("victoria_metrics")
++	if !ok || original.Functions[0].Name != "instant_query" {
++		t.Fatal("original metrics schema changed")
++	}
++}
+diff --git a/internal/services/victorialogs_integration_test.go b/internal/services/victorialogs_integration_test.go
+new file mode 100644
+--- /dev/null
++++ b/internal/services/victorialogs_integration_test.go
+@@ -0,0 +1,57 @@
++package services
++
++import (
++	"strings"
++	"testing"
++
++	"github.com/akmatori/akmatori/internal/database"
++	"github.com/akmatori/akmatori/internal/testhelpers"
++)
++
++func TestVictoriaLogsIsSeededDiscoverableAndNamespaceReserved(t *testing.T) {
++	db := testhelpers.NewGlobalSQLiteDB(t, &database.ToolType{}, &database.ToolInstance{})
++	service := NewToolService()
++	if err := service.EnsureToolTypes(); err != nil {
++		t.Fatal(err)
++	}
++	var ty database.ToolType
++	if err := db.Where("name = ?", "victoria_logs").First(&ty).Error; err != nil {
++		t.Fatalf("missing production type seed: %v", err)
++	}
++	if ty.Description == "" {
++		t.Fatal("new tool has no description")
++	}
++	if !isReservedToolNamespace("victoria_logs") {
++		t.Fatal("a custom HTTP/MCP tool can impersonate built-in VictoriaLogs")
++	}
++	found := false
++	for _, entry := range staticCatalog {
++		if entry.ID == "victoria_logs" {
++			if len(entry.ToolTypes) != 1 || entry.ToolTypes[0] != "victoria_logs" || entry.Category != "monitoring" {
++				t.Fatalf("wrong discoverable connector mapping %+v", entry)
++			}
++			found = true
++		}
++	}
++	if !found {
++		t.Fatal("VictoriaLogs not discoverable in connector catalog")
++	}
++}
++func TestVictoriaLogsAgentReceivesReadOnlyToolExamples(t *testing.T) {
++	instance := database.ToolInstance{
++		Name: "Site Logs", LogicalName: "site-vlogs",
++		ToolType: database.ToolType{Name: "victoria_logs"},
++	}
++	s := generateToolUsageExample(instance)
++	for _, needle := range []string{
++		"victoria_logs.query", "victoria_logs.hits", "field_names", "field_values", "stats_query",
++		"site-vlogs", "Read-only", "RFC3339",
++	} {
++		if !strings.Contains(s, needle) {
++			t.Errorf("agent connected-tools prompt lacks %q: %s", needle, s)
++		}
++	}
++	if strings.Contains(s, "vl_bearer_token") || strings.Contains(s, "vl_password") {
++		t.Fatal("agent prompt exposes configuration secrets")
++	}
++}
+diff --git a/internal/services/tool_service.go b/internal/services/tool_service.go
+--- a/internal/services/tool_service.go
++++ b/internal/services/tool_service.go
+@@ -195,0 +196 @@
++		{Name: "victoria_logs", Description: "VictoriaLogs read-only LogsQL and SRE log inspection"},
+diff --git a/internal/services/connector_catalog.go b/internal/services/connector_catalog.go
+--- a/internal/services/connector_catalog.go
++++ b/internal/services/connector_catalog.go
+@@ -64,0 +65 @@
++	{ID: "victoria_logs", Name: "VictoriaLogs", Category: "monitoring", Description: "Inspect logs with bounded LogsQL queries.", ToolTypes: []string{"victoria_logs"}},
+diff --git a/internal/services/http_connector_service.go b/internal/services/http_connector_service.go
+--- a/internal/services/http_connector_service.go
++++ b/internal/services/http_connector_service.go
+@@ -15 +15 @@
+-	"ssh", "zabbix", "victoria_metrics", "catchpoint",
++	"ssh", "zabbix", "victoria_metrics", "victoria_logs", "catchpoint",
+diff --git a/internal/services/skill_connected_tools.go b/internal/services/skill_connected_tools.go
+--- a/internal/services/skill_connected_tools.go
++++ b/internal/services/skill_connected_tools.go
+@@ -202 +202 @@
+-	case "ssh", "zabbix", "victoria_metrics", "postgresql", "grafana", "catchpoint",
++	case "ssh", "zabbix", "victoria_metrics", "victoria_logs", "postgresql", "grafana", "catchpoint",
+diff --git a/internal/services/skill_prompt_service.go b/internal/services/skill_prompt_service.go
+--- a/internal/services/skill_prompt_service.go
++++ b/internal/services/skill_prompt_service.go
+@@ -534,0 +535,18 @@
++	case "victoria_logs":
++		return fmt.Sprintf(`
++**Read-only VictoriaLogs (LogsQL)**
++Use time-bounded RFC3339 start and end, at most six hours. Tool functions:
++- query: query*, start*, end* | limit (1..200)
++- hits: query*, start*, end*, step*
++- field_names: query*, start*, end*
++- field_values: query*, start*, end*, field*
++- stats_query: query* (including a stats pipe), start*, end*
++(* required). Do not log credentials or assume metrics prove a log root cause.
++
++Usage:
++gateway_call("victoria_logs.query", {"query":"myservice", "start":"2026-11-14T18:00:00Z", "end":"2026-11-14T20:00:00Z", "limit":50}, "%s")
++gateway_call("victoria_logs.hits", {"query":"myservice", "start":"2026-11-14T18:00:00Z", "end":"2026-11-14T20:00:00Z", "step":"5m"}, "%s")
++gateway_call("victoria_logs.field_names", {"query":"myservice", "start":"2026-11-14T18:00:00Z", "end":"2026-11-14T20:00:00Z"}, "%s")
++gateway_call("victoria_logs.field_values", {"query":"myservice", "field":"host", "start":"2026-11-14T18:00:00Z", "end":"2026-11-14T20:00:00Z"}, "%s")
++gateway_call("victoria_logs.stats_query", {"query":"myservice | stats by(host) count(*)", "start":"2026-11-14T18:00:00Z", "end":"2026-11-14T20:00:00Z"}, "%s")
++`, logicalName, logicalName, logicalName, logicalName, logicalName)

@@ -1,0 +1,120 @@
+{
+  "schema": "opensiro.upstream.batch40.v0.9.0.akmatori48.integrated-capability-proof.v1",
+  "date_local": "2026-11-15",
+  "protocol": "v0.9.0 prospective extension; preserve original batch40 v0.8.0 provenance",
+  "parent_issue": "https://github.com/opensiro/upstream/issues/56",
+  "parent_pr": "https://github.com/opensiro/upstream/pull/303",
+  "first_party_request": "https://github.com/akmatori/akmatori/issues/48",
+  "source_origin": "SOURCE_FIRST / ASSESSMENT_INFORMED at most; not ASSESSMENT_DERIVED",
+  "original_cohort_pin": "be62d926fe6d92dceb5cf12e9a95cb587433cdf1",
+  "newly_observed_main_pin": "b2aae68949ae888a90a7436610d74b7b93507e7a",
+  "feature": "Five built-in victoria_logs LogsQL endpoints, independent victoria_metrics preservation, gateway-native tool registration and operator form schema, source-native credential authorization, bounded query/response",
+  "patch": {
+    "published_path": "reports/repro/2026-11-15-upgrade40-akmatori48-integrated-source.patch",
+    "sha256": "4981ed71221fb0933063681709549f793ef9a6a2de634b78752226b4194b4dbb",
+    "bytes": 42916,
+    "files": [
+      "mcp-gateway/internal/tools/victorialogs/victorialogs.go",
+      "mcp-gateway/internal/tools/victorialogs/victorialogs_test.go",
+      "mcp-gateway/internal/tools/victorialogs/victorialogs_live_test.go",
+      "mcp-gateway/internal/tools/registry_victorialogs_test.go",
+      "mcp-gateway/internal/tools/registry.go",
+      "mcp-gateway/internal/tools/schemas.go",
+      "mcp-gateway/internal/tools/schemas_test.go",
+      "internal/services/victorialogs_integration_test.go",
+      "internal/services/tool_service.go",
+      "internal/services/connector_catalog.go",
+      "internal/services/http_connector_service.go",
+      "internal/services/skill_connected_tools.go",
+      "internal/services/skill_prompt_service.go"
+    ],
+    "applies_to": "b2aae68949ae888a90a7436610d74b7b93507e7a",
+    "git_apply_check": true,
+    "clean_git_worktree_replay": true,
+    "git_apply_command": "git apply --unidiff-zero reports/repro/2026-11-15-upgrade40-akmatori48-integrated-source.patch (in disposable exact-pinned Akmatori checkout)",
+    "zero_context_required_for_reviewable_upstream_diff_check": true,
+    "source_files_identical_to_previously_tested_13_file_patch": true,
+    "reason_for_repackaging": "Original full-context diff introduced whitespace diagnostics in containing Upstream research PR; zero-context changes only patch format, not code, and applies successfully to exact source pin."
+  },
+  "official_provider": {
+    "repository": "VictoriaMetrics/VictoriaLogs",
+    "tag": "v1.54.0",
+    "binary_sha256": "46aaf57c79c30c81dd047f150fcedff065f182369fb9e65a0de4032f91d40005",
+    "archive_sha256": "739e78c82294520b6079bc8a6ae32a1f9fb95a543092929a53a2fe9ab7383016",
+    "official_checksum_manifest_proof": true,
+    "bound_to_127_0_0_1": true,
+    "service_stopped": true,
+    "data_kind": "Three synthetic systemd journal lines; not real production logs",
+    "five_endpoints_native_go_to_official_server": "PASS",
+    "runner_published_path": "reports/repro/2026-11-15-upgrade40-akmatori48-victorialogs-official-v154.sh",
+    "runner_sha256": "944dd94854e2e82096d27268a4079b93c393826dd223d9c507a40f006531ff2f"
+  },
+  "native_verification": {
+    "root_go_tests": "PASS",
+    "gateway_go_tests_p1": "PASS",
+    "root_go_vet": "PASS (independent final tree, go vet ./... exit 0)",
+    "gateway_go_vet": "PASS (independent final tree, go vet ./... exit 0)",
+    "gateway_go_race_3repeats": "PASS",
+    "root_go_race_2repeats": "PASS",
+    "official_server_five_endpoints": "PASS",
+    "old_metric_tool_unaffected": "PASS (native registry test)",
+    "gateway_authorization_negative_control": "PASS (zero unauthorized remote calls)",
+    "source_original_checkout_clean": "PASS",
+    "replay_pin": "PASS"
+  },
+  "timing_flake": {
+    "classification": "OBSERVED isolated pre-existing scheduling sensitivity, no source-path relationship established",
+    "command": "go test ./... -count=1 -timeout=180s, executed concurrently with main-module full tests",
+    "failure": "original mcp-gateway/internal/ratelimit TestLimiter_WaitContextTimeout measured 132.56ms (bound 100ms). No new-package test failed.",
+    "followup": "same original test 100 consecutive passes; full gateway go test -p 1 ./... -count=1 PASS; no production repair claimed"
+  },
+  "evidence_logs": {
+    "native_gateway_serial": {
+      "log_sha256": "821059e76dace8f7e2baae83f4216f4c53319df795685db03130f5e92fa2b98a",
+      "bytes": 1769,
+      "tail": "ok  \tgithub.com/akmatori/mcp-gateway/cmd/gateway\t0.075s\nok  \tgithub.com/akmatori/mcp-gateway/internal/auth\t0.402s\nok  \tgithub.com/akmatori/mcp-gateway/internal/cache\t0.379s\nok  \tgithub.com/akmatori/mcp-gateway/internal/database\t0.124s\nok  \tgithub.com/akmatori/mcp-gateway/internal/mcp\t0.027s\nok  \tgithub.com/akmatori/mcp-gateway/internal/mcpproxy\t6.263s\nok  \tgithub.com/akmatori/mcp-gateway/internal/ratelimit\t0.267s\nok  \tgithub.com/akmatori/mcp-gateway/internal/tools\t0.130s\nok  \tgithub.com/akmatori/mcp-gateway/internal/tools/catchpoint\t0.127s\nok  \tgithub.com/akmatori/mcp-gateway/internal/tools/clickhouse\t0.106s\nok  \tgithub.com/akmatori/mcp-gateway/internal/tools/events\t0.132s\nok  \tgithub.com/akmatori/mcp-gateway/internal/tools/grafana\t0.384s\nok  \tgithub.com/akmatori/mcp-gateway/internal/tools/httpconnector\t0.159s\nok  \tgithub.com/akmatori/mcp-gateway/internal/tools/incidents\t0.152s\nok  \tgithub.com/akmatori/mcp-gateway/internal/tools/jira\t0.105s\nok  \tgithub.com/akmatori/mcp-gateway/internal/tools/k8s\t0.467s\nok  \tgithub.com/akmatori/mcp-gateway/internal/tools/knowledge\t0.578s\nok  \tgithub.com/akmatori/mcp-gateway/internal/tools/netbox\t0.147s\nok  \tgithub.com/akmatori/mcp-gateway/internal/tools/pagerduty\t1.553s\nok  \tgithub.com/akmatori/mcp-gateway/internal/tools/postgresql\t0.059s\nok  \tgithub.com/akmatori/mcp-gateway/internal/tools/proposals\t0.348s\nok  \tgithub.com/akmatori/mcp-gateway/internal/tools/ssh\t0.471s\nok  \tgithub.com/akmatori/mcp-gateway/internal/tools/telegram\t0.281s\nok  \tgithub.com/akmatori/mcp-gateway/internal/tools/victorialogs\t0.111s\nok  \tgithub.com/akmatori/mcp-gateway/internal/tools/victoriametrics\t0.190s\nok  \tgithub.com/akmatori/mcp-gateway/internal/tools/zabbix\t0.024s\nok  \tgithub.com/akmatori/mcp-gateway/internal/validation\t0.011s\n"
+    },
+    "native_main": {
+      "log_sha256": "9ba3e03b6b76a72f894308e77fec0583a891d47475007429808f9c73daec6d61",
+      "bytes": 1133,
+      "tail": "?   \tgithub.com/akmatori/akmatori/cmd/akmatori\t[no test files]\n?   \tgithub.com/akmatori/akmatori/docs\t[no test files]\nok  \tgithub.com/akmatori/akmatori/internal/alerts\t0.256s\nok  \tgithub.com/akmatori/akmatori/internal/alerts/adapters\t0.093s\nok  \tgithub.com/akmatori/akmatori/internal/alerts/extraction\t0.235s\nok  \tgithub.com/akmatori/akmatori/internal/api\t0.144s\nok  \tgithub.com/akmatori/akmatori/internal/config\t0.034s\nok  \tgithub.com/akmatori/akmatori/internal/database\t7.850s\nok  \tgithub.com/akmatori/akmatori/internal/executor\t0.152s\nok  \tgithub.com/akmatori/akmatori/internal/handlers\t12.920s\n?   \tgithub.com/akmatori/akmatori/internal/logging\t[no test files]\nok  \tgithub.com/akmatori/akmatori/internal/messaging\t0.646s\nok  \tgithub.com/akmatori/akmatori/internal/middleware\t5.970s\nok  \tgithub.com/akmatori/akmatori/internal/output\t0.034s\nok  \tgithub.com/akmatori/akmatori/internal/services\t31.288s\nok  \tgithub.com/akmatori/akmatori/internal/setup\t2.528s\nok  \tgithub.com/akmatori/akmatori/internal/slack\t1.916s\nok  \tgithub.com/akmatori/akmatori/internal/testhelpers\t0.464s\nok  \tgithub.com/akmatori/akmatori/internal/utils\t0.065s\n"
+    },
+    "gateway_race": {
+      "log_sha256": "f0dc39921998fc4133f19d6b9abdfed23e28d25a83b5f87db113cdc9af6bae79",
+      "bytes": 131,
+      "tail": "ok  \tgithub.com/akmatori/mcp-gateway/internal/tools/victorialogs\t1.469s\nok  \tgithub.com/akmatori/mcp-gateway/internal/tools\t1.510s\n"
+    },
+    "app_race": {
+      "log_sha256": "9687e83bf60cc7371b0837a49b69ba09d0afe272cb79b391c9979453a47a06cd",
+      "bytes": 59,
+      "tail": "ok  \tgithub.com/akmatori/akmatori/internal/services\t1.390s\n"
+    },
+    "official_live_server": {
+      "log_sha256": "819d0056b43d311b0d5fdafda11b89a67070ebf5e726c49e9355cfdd5bbf21ee",
+      "bytes": 549,
+      "tail": "/workspace/users/lagerf3u3r/batch40-20261114/scratch/official-victorialogs-v1.54.0/victoria-logs-prod: OK\n=== RUN   TestVictoriaLogsOfficialV154FiveFunctions\n    victorialogs_live_test.go:139: official pinned VictoriaLogs: all five source-native functions returned consistent logs, hits, field names, field values and stats; node-a crash-loop discriminated\n--- PASS: TestVictoriaLogsOfficialV154FiveFunctions (0.05s)\nPASS\nok  \tgithub.com/akmatori/mcp-gateway/internal/tools/victorialogs\t0.098s\nOFFICIAL_VICTORIALOGS_V154_ALL_FIVE_SOURCE_NATIVE_PASS\n"
+    },
+    "initial_gateway_concurrent_timing_flake": {
+      "log_sha256": "1cd6d288ea04d8b9ba0020a314c1bb8d02732d212ef325d808066b699d275b57",
+      "bytes": 1904,
+      "tail": "ok  \tgithub.com/akmatori/mcp-gateway/cmd/gateway\t0.531s\nok  \tgithub.com/akmatori/mcp-gateway/internal/auth\t0.515s\nok  \tgithub.com/akmatori/mcp-gateway/internal/cache\t0.441s\nok  \tgithub.com/akmatori/mcp-gateway/internal/database\t1.130s\nok  \tgithub.com/akmatori/mcp-gateway/internal/mcp\t0.316s\nok  \tgithub.com/akmatori/mcp-gateway/internal/mcpproxy\t9.099s\n--- FAIL: TestLimiter_WaitContextTimeout (0.13s)\n    limiter_test.go:134: Wait timeout had unexpected duration: 132.563778ms\nFAIL\nFAIL\tgithub.com/akmatori/mcp-gateway/internal/ratelimit\t0.550s\nok  \tgithub.com/akmatori/mcp-gateway/internal/tools\t1.966s\nok  \tgithub.com/akmatori/mcp-gateway/internal/tools/catchpoint\t2.274s\nok  \tgithub.com/akmatori/mcp-gateway/internal/tools/clickhouse\t0.436s\nok  \tgithub.com/akmatori/mcp-gateway/internal/tools/events\t1.545s\nok  \tgithub.com/akmatori/mcp-gateway/internal/tools/grafana\t1.718s\nok  \tgithub.com/akmatori/mcp-gateway/internal/tools/httpconnector\t0.663s\nok  \tgithub.com/akmatori/mcp-gateway/internal/tools/incidents\t2.898s\nok  \tgithub.com/akmatori/mcp-gateway/internal/tools/jira\t1.217s\nok  \tgithub.com/akmatori/mcp-gateway/internal/tools/k8s\t1.812s\nok  \tgithub.com/akmatori/mcp-gateway/internal/tools/knowledge\t7.393s\nok  \tgithub.com/akmatori/mcp-gateway/internal/tools/netbox\t1.930s\nok  \tgithub.com/akmatori/mcp-gateway/internal/tools/pagerduty\t2.274s\nok  \tgithub.com/akmatori/mcp-gateway/internal/tools/postgresql\t0.382s\nok  \tgithub.com/akmatori/mcp-gateway/internal/tools/proposals\t3.511s\nok  \tgithub.com/akmatori/mcp-gateway/internal/tools/ssh\t2.094s\nok  \tgithub.com/akmatori/mcp-gateway/internal/tools/telegram\t1.721s\nok  \tgithub.com/akmatori/mcp-gateway/internal/tools/victorialogs\t0.113s\nok  \tgithub.com/akmatori/mcp-gateway/internal/tools/victoriametrics\t0.438s\nok  \tgithub.com/akmatori/mcp-gateway/internal/tools/zabbix\t0.924s\nok  \tgithub.com/akmatori/mcp-gateway/internal/validation\t0.160s\nFAIL\n"
+    }
+  },
+  "admission": {
+    "need": "PASS: original issue #48 explicitly requests five LogsQL functions for service journal triage",
+    "mechanism": "PASS: built-in first-party tool registry, DB credential resolver, per-incident access guard, discovery, settings and prompt pathways exercised",
+    "counterfactual": "PASS within deterministic synthetic 3-record native+official-server workflow; original Metrics tool cannot access VictoriaLogs endpoint",
+    "scope": "PENDING: target maintainer acceptance of new connector design, broader product security/reliability review, end-to-end UI/worker build, host egress policy, no real user benefit evidence",
+    "four_full_pass": false,
+    "status": "OPPORTUNITY_RESEARCH_PENDING / NO_ADMITTED_PATCH for external publication (fully integrated research prototype available)"
+  },
+  "disallowed_claims": [
+    "no production rollout",
+    "no human triage accuracy improvement measured",
+    "no maintainer accept/merge",
+    "no autonomous VSM S3/S4 proof",
+    "no Index grade change",
+    "no external Akmatori PR published",
+    "no new batch"
+  ]
+}

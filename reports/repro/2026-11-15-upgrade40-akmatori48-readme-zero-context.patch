@@ -1,0 +1,22 @@
+diff --git a/README.md b/README.md
+--- a/README.md
++++ b/README.md
+@@ -45,0 +46,18 @@
++
++### VictoriaLogs: read-only incident log investigations
++
++For journal, nginx and application-log evidence that is not available through metrics, add
++**VictoriaLogs** under **Connectors → Add**, then configure its HTTP(S) origin as
++`vl_url`. Configure `vl_auth_method` only when needed (`none`, `bearer_token`,
++`basic_auth` or `custom_header`); token and password settings are treated as secrets
++in the connector form. Select the resulting connector for the agent's skill to grant
++access; simply creating it does not bypass the per-incident tool allowlist.
++
++The separate read-only `victoria_logs` tool provides `query`, `hits`,
++`field_names`, `field_values` and `stats_query`. Supply explicit RFC3339
++`start`/`end` times (maximum six-hour range); `query` returns up to 50 log
++records by default, or 200 when requested, and caps the provider response at
++256 KiB. This connector does not replace VictoriaMetrics PromQL/MetricsQL or
++grant permission to change infrastructure. It connects directly to the
++configured origin (no environment proxy); use a trusted provider endpoint and
++a read-only credential.
