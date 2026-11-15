@@ -48,7 +48,8 @@ class ExternalPublicCommunicationGateTests(unittest.TestCase):
             with self.subTest(path=path):
                 s=(ROOT/path).read_text()
                 self.assertIn('EXTERNAL_PUBLIC_COMMUNICATION_GATE.md',s)
-        self.assertEqual((ROOT/'VERSION').read_text().strip(),'0.10.0')
+        version = tuple(int(part) for part in (ROOT / 'VERSION').read_text().strip().split('.'))
+        self.assertGreaterEqual(version, (0, 10, 0))
         self.assertIn('v0.10.0', (ROOT/'CHANGELOG.md').read_text())
         self.assertTrue((ROOT/'changes/v0.10.0.md').is_file())
 

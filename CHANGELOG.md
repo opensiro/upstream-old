@@ -1,10 +1,18 @@
 # Upstream contribution protocol — SemVer change packages
 
-**Current version:** [`0.10.0`](VERSION) · [Versioning policy](VERSIONING.md)
+**Current version:** [`0.11.0`](VERSION) · [Versioning policy](VERSIONING.md)
 
 This history covers **protocol-relevant** changes, not every merged PR, new screening row, generated view, external PR or fix. Each package links the actual historical main-branch checkpoint and the PRs that changed how contributions are selected, validated, prepared, authorized or published.
 
 **Historical integrity:** Versions `0.1.0` through `0.6.0`, including `0.5.1`, were **assigned retrospectively on 2026-11-14**. Their dated Git commits are real snapshots, **not evidence that releases or SemVer tags existed on those dates**. The first newly recorded version is `0.7.0` at the versioning integration commit; its last pre-versioning protocol checkpoint is PR #298. Retrospective tags, if published, identify historical snapshots without rewriting them. No frozen pilot or batch provenance is backfilled.
+
+## [0.11.0](changes/v0.11.0.md) — Early working-fork handoff
+
+**Prospective MINOR, 2026-11-15.** Pre-change [v0.10.0 main checkpoint](https://github.com/opensiro/upstream/commit/a856c67600208c85ae5ace3645b1f874af756c6f).
+
+- Check the contribution's working-fork route before expanding a native experiment into a target implementation. Record the verified destination or the precise blocker on the existing Upstream case.
+- Keep local experiments scoped to a decisive unanswered question. Use the matching working fork for implementation and revisions after admission, with a single pinned initial packet when the existing executor requires it.
+- Keep test receipts and source provenance in Upstream. Preserve historical evidence and the current preparation, publication, and source-native admission rules.
 
 ## [0.10.0](changes/v0.10.0.md) — Owner approval before every third-party public communication
 
