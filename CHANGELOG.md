@@ -1,10 +1,20 @@
 # Upstream contribution protocol — SemVer change packages
 
-**Current version:** [`0.9.0`](VERSION) · [Versioning policy](VERSIONING.md)
+**Current version:** [`0.10.0`](VERSION) · [Versioning policy](VERSIONING.md)
 
 This history covers **protocol-relevant** changes, not every merged PR, new screening row, generated view, external PR or fix. Each package links the actual historical main-branch checkpoint and the PRs that changed how contributions are selected, validated, prepared, authorized or published.
 
 **Historical integrity:** Versions `0.1.0` through `0.6.0`, including `0.5.1`, were **assigned retrospectively on 2026-11-14**. Their dated Git commits are real snapshots, **not evidence that releases or SemVer tags existed on those dates**. The first newly recorded version is `0.7.0` at the versioning integration commit; its last pre-versioning protocol checkpoint is PR #298. Retrospective tags, if published, identify historical snapshots without rewriting them. No frozen pilot or batch provenance is backfilled.
+
+## [0.10.0](changes/v0.10.0.md) — Owner approval before every third-party public communication
+
+**Prospective MINOR, 2026-11-15.** Pre-change [v0.9.0 main checkpoint](https://github.com/opensiro/upstream/commit/2aa807b8de4c81efe9169bf51db73f349f56883a).
+
+- The owner **narrowed** the old `STANDING_NO_PER_PR_PROMPT` publication mandate after an unauthorized Akmatori #48 issue comment. Current external-public communication is **default BLOCK** until explicit current owner approval for that **one exact destination, action and content**.
+- Covers external PR submission/edit, issue or PR comments, third-party design questions, issues, discussions, reviews and public fork-local proposals; `continue`, batch/wave commands, old mandates and ready test results are **not** approval.
+- Internal preparation, source-native tests and OpenSiro-internal PRs retain their separate authority. Require a preflight display and fail closed rather than sending anything publicly to a maintainer unasked; legal/technical gates remain independent.
+- Policy, operator routes and offline regression fixtures updated. No autonomous runtime enforcement or retrospective rewrite is implied.
+
 
 ## [0.9.0](changes/v0.9.0.md) — Capability-first research and separate reliability fallbacks
 

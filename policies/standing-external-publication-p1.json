@@ -6,12 +6,13 @@
   "owner_decision_url": "https://github.com/opensiro/upstream/issues/6#issuecomment-6801859676",
   "effective_from": "2026-11-11",
   "allowed_stage": "submit_external_pr",
-  "approval_mode": "STANDING_NO_PER_PR_PROMPT",
+  "approval_mode": "EXPLICIT_OWNER_CONFIRMATION_PER_PUBLIC_ACTION",
   "source_fork_owner": "opensiro-contributions",
   "working_branch_prefix": "opensiro/",
   "target_relation": "verified_direct_parent",
   "default_draft": false,
   "required_checks": [
+    "exact_current_owner_approval_before_any_external_public_write",
     "current_source_license_and_contributor_policy",
     "authenticated_actor_permissions_and_direct_fork_parent",
     "current_source_and_branch_head_base_readback",
@@ -26,7 +27,8 @@
     "bypass_upstream_policy_or_protected_branches",
     "fabricate_cla_dco_or_personal_attestations",
     "arbitrary_external_comments_or_issues",
-    "manage_credentials_or_unrelated_repositories"
+    "manage_credentials_or_unrelated_repositories",
+    "third_party_public_communication_without_exact_current_owner_approval"
   ],
   "revocation": "attributable_owner_instruction_or_policy_status_revoked",
   "interactive_pr_as_assent": {
@@ -47,5 +49,43 @@
     ],
     "does_not_activate_template_executor": true,
     "does_not_authorize_standalone_cla_bot_comments": true
+  },
+  "narrowed_effective_from": "2026-11-15",
+  "narrowed_by": "explicit owner direction in active ChatGPT conversation; no externally published owner statement implied",
+  "external_public_write_gate": {
+    "default_decision": "BLOCK_UNTIL_EXPLICIT_OWNER_APPROVAL",
+    "scope": [
+      "submit_external_pr",
+      "edit_external_pr",
+      "external_issue_comment",
+      "external_pr_comment",
+      "external_pr_review",
+      "create_external_issue",
+      "edit_external_issue",
+      "external_discussion_or_reply",
+      "fork_local_public_pr",
+      "other_public_message_or_notification_to_third_party"
+    ],
+    "approval_binding": [
+      "exact_action",
+      "exact_third_party_destination",
+      "exact_public_text_or_pr_diff",
+      "current_conversation_owner_instruction",
+      "single_use"
+    ],
+    "inferred_approval_from": [
+      "continue",
+      "upstream_auto",
+      "batch_or_wave",
+      "standing_p1",
+      "source_issue_request",
+      "passing_tests",
+      "fork_or_pr_creation",
+      "prior_chat_approval"
+    ],
+    "inferred_approval_is_valid": false,
+    "no_unattended_external_communication": true,
+    "preparation_only_without_new_approval": true,
+    "non_external_open_siro_changes_remain_with_existing_permissions": true
   }
 }

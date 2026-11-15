@@ -19,7 +19,7 @@ class CapabilityFirstUpgradeTests(unittest.TestCase):
         self.assertIn("## [0.9.0](changes/v0.9.0.md)", (ROOT / "CHANGELOG.md").read_text())
         for rel in ("README.md", "UPSTREAMING.md"):
             with self.subTest(rel=rel):
-                self.assertIn("SemVer `0.9.0`", (ROOT / rel).read_text())
+                self.assertIn(f"SemVer `{version}`", (ROOT / rel).read_text())
         for rel in ("AGENTS.md", "README.md", "UPSTREAMING.md",
                     "docs/ASSESSMENT_CANDIDATE_BATCHES.md",
                     "docs/ASSESSMENT_TO_IMPROVEMENT.md",
