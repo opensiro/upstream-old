@@ -1,0 +1,468 @@
+--- a/docs/github.md
++++ b/docs/github.md
+@@ -93,6 +93,25 @@
+ optional approval surface for the checkpoint; if it is unavailable, the
+ agent should show the same checkpoint in normal scrollback and stop for
+ confirmation.
++
++## Cross-repository Issues (research-only prototype)
++
++All four Issue tools (issue_read, issue_list, issue_update and
++issue_add_comment) accept an optional repo field with a GitHub
++owner/name identity. An explicit target avoids the need to open a
++local checkout or GitHub web UI. Omitting repo preserves original
++cwd-based repository inference.
++
++Examples:
++- issue_list: {"repo":"acme/server","labels":["bug"]}
++- issue_read: {"repo":"acme/server","number":42}
++- issue_update: {"repo":"acme/server","number":42,"title":"Clarify timeout"}
++- issue_add_comment: {"repo":"acme/server","number":42,"body":"Verified in staging"}
++
++Mutations still require approval with the full repository identity
++shown in the preview. Malformed targets fail closed instead of
++falling back to cwd. This is a source-native research proposal,
++not a feature shipped by upstream and not a measured user benefit.
+ 
+ ## Permissions
+ 
+--- a/internal/agent/gh_issue_mutation.go
++++ b/internal/agent/gh_issue_mutation.go
+@@ -16,10 +16,11 @@
+ 
+ func (t *GHIssueAddCommentTool) Name() string { return "issue_add_comment" }
+ func (t *GHIssueAddCommentTool) Description() string {
+-	return "Post one top-level GitHub issue comment, after user approval. Requires a positive issue number and a nonempty Markdown body. Never posts to a pull request."
++	return "Post one top-level GitHub issue comment, after user approval. Optional repo=owner/repo works without a local checkout. Requires positive issue number and nonempty body. Never posts to a pull request."
+ }
+ func (t *GHIssueAddCommentTool) Schema() map[string]any {
+ 	return map[string]any{"type": "object", "properties": map[string]any{
++		"repo":   map[string]any{"type": "string", "description": "Optional exact GitHub owner/repo; otherwise current checkout"},
+ 		"number": map[string]any{"type": "integer", "description": "GitHub issue number"},
+ 		"body":   map[string]any{"type": "string", "description": "Comment Markdown (required)"},
+ 	}, "required": []string{"number", "body"}}
+@@ -27,14 +28,16 @@
+ func (t *GHIssueAddCommentTool) RequiresApproval(string) bool { return true }
+ func (t *GHIssueAddCommentTool) PreviewCall(argsJSON string) string {
+ 	var a struct {
++		Repo   string `json:"repo"`
+ 		Number int    `json:"number"`
+ 		Body   string `json:"body"`
+ 	}
+ 	_ = json.Unmarshal([]byte(argsJSON), &a)
+-	return fmt.Sprintf("issue_add_comment(number=%d)\n%s", a.Number, a.Body)
++	return fmt.Sprintf("issue_add_comment(repo=%q, number=%d)\n%s", issueTargetDisplay(a.Repo), a.Number, a.Body)
+ }
+ func (t *GHIssueAddCommentTool) Execute(ctx context.Context, argsJSON string) (string, error) {
+ 	var a struct {
++		Repo   string `json:"repo"`
+ 		Number int    `json:"number"`
+ 		Body   string `json:"body"`
+ 	}
+@@ -44,7 +47,11 @@
+ 	if t.GH == nil {
+ 		return "", errors.New("issue_add_comment: GitHub adapter unavailable")
+ 	}
+-	r, err := AddIssueComment(ctx, t.GH, github.AddIssueCommentRequest{Number: a.Number, Body: a.Body})
++	owner, repo, err := parseIssueRepoTarget(a.Repo)
++	if err != nil {
++		return "posted=false reason=validation\n" + err.Error(), nil
++	}
++	r, err := AddIssueComment(ctx, t.GH, github.AddIssueCommentRequest{Owner: owner, Repo: repo, Number: a.Number, Body: a.Body})
+ 	if err != nil {
+ 		return "", err
+ 	}
+@@ -114,12 +121,13 @@
+ 
+ func (t *GHIssueUpdateTool) Name() string { return "issue_update" }
+ func (t *GHIssueUpdateTool) Description() string {
+-	return "Approval-gated update of an existing GitHub Issue title and/or body; no field is changed unless explicitly given. Rejects PR-shaped identities and accidental empty fields."
++	return "Approval-gated update of a GitHub Issue title and/or body; optional repo=owner/repo works without local checkout. Only given fields change. Rejects PR-shaped issues and accidental empty fields."
+ }
+ func (t *GHIssueUpdateTool) Schema() map[string]any {
+ 	return map[string]any{
+ 		"type": "object",
+ 		"properties": map[string]any{
++			"repo":   map[string]any{"type": "string", "description": "Optional exact GitHub owner/repo; otherwise current checkout"},
+ 			"number": map[string]any{"type": "integer", "description": "Existing GitHub issue number"},
+ 			"title":  map[string]any{"type": "string", "description": "New title (omit to leave unchanged)"},
+ 			"body":   map[string]any{"type": "string", "description": "New body Markdown (omit to leave unchanged)"},
+@@ -129,13 +137,14 @@
+ func (t *GHIssueUpdateTool) RequiresApproval(string) bool { return true }
+ func (t *GHIssueUpdateTool) PreviewCall(argsJSON string) string {
+ 	var a struct {
++		Repo   string  `json:"repo"`
+ 		Number int     `json:"number"`
+ 		Title  *string `json:"title"`
+ 		Body   *string `json:"body"`
+ 	}
+ 	_ = json.Unmarshal([]byte(argsJSON), &a)
+ 	var s strings.Builder
+-	fmt.Fprintf(&s, "issue_update(number=%d)", a.Number)
++	fmt.Fprintf(&s, "issue_update(repo=%q, number=%d)", issueTargetDisplay(a.Repo), a.Number)
+ 	if a.Title != nil {
+ 		fmt.Fprintf(&s, "\nTitle: %s", *a.Title)
+ 	}
+@@ -146,6 +155,7 @@
+ }
+ func (t *GHIssueUpdateTool) Execute(ctx context.Context, argsJSON string) (string, error) {
+ 	var a struct {
++		Repo   string  `json:"repo"`
+ 		Number int     `json:"number"`
+ 		Title  *string `json:"title"`
+ 		Body   *string `json:"body"`
+@@ -156,7 +166,11 @@
+ 	if t.GH == nil {
+ 		return "", errors.New("issue_update: GitHub adapter unavailable")
+ 	}
+-	res, err := UpdateIssue(ctx, t.GH, github.UpdateIssueRequest{Number: a.Number, Title: a.Title, Body: a.Body})
++	owner, repo, err := parseIssueRepoTarget(a.Repo)
++	if err != nil {
++		return "updated=false reason=validation\n" + err.Error(), nil
++	}
++	res, err := UpdateIssue(ctx, t.GH, github.UpdateIssueRequest{Owner: owner, Repo: repo, Number: a.Number, Title: a.Title, Body: a.Body})
+ 	if err != nil {
+ 		return "", err
+ 	}
+--- a/internal/agent/gh_issue_workflow.go
++++ b/internal/agent/gh_issue_workflow.go
+@@ -39,7 +39,7 @@
+ func (t *GHIssueReadTool) Name() string { return "issue_read" }
+ 
+ func (t *GHIssueReadTool) Description() string {
+-	return "Fetch typed metadata for a single GitHub issue: number, " +
++	return "Fetch typed metadata for a GitHub issue in the current repo or explicit repo=owner/repo: number, " +
+ 		"title, body, state, author, URL, labels, assignees, and the " +
+ 		"most-recent comments (capped). Prefer this over shelling out " +
+ 		"to `gh issue view <n> --json ...` from run_bash whenever the " +
+@@ -55,6 +55,7 @@
+ 	return map[string]any{
+ 		"type": "object",
+ 		"properties": map[string]any{
++			"repo": map[string]any{"type": "string", "description": "Optional exact owner/repo; no local checkout needed"},
+ 			"number": map[string]any{
+ 				"type":        "integer",
+ 				"description": "Issue number (required).",
+@@ -72,10 +73,17 @@
+ 
+ func (t *GHIssueReadTool) PreviewCall(argsJSON string) string {
+ 	var a struct {
+-		Number      int `json:"number"`
+-		MaxComments int `json:"max_comments"`
++		Repo        string `json:"repo"`
++		Number      int    `json:"number"`
++		MaxComments int    `json:"max_comments"`
+ 	}
+ 	_ = json.Unmarshal([]byte(argsJSON), &a)
++	if a.Repo != "" {
++		if a.MaxComments != 0 {
++			return fmt.Sprintf("issue_read(repo=%q, number=%d, max_comments=%d)", a.Repo, a.Number, a.MaxComments)
++		}
++		return fmt.Sprintf("issue_read(repo=%q, number=%d)", a.Repo, a.Number)
++	}
+ 	if a.Number == 0 {
+ 		return "issue_read()"
+ 	}
+@@ -90,8 +98,9 @@
+ 		return "", errors.New("issue_read: no GitHub adapter configured")
+ 	}
+ 	var a struct {
+-		Number      int `json:"number"`
+-		MaxComments int `json:"max_comments"`
++		Repo        string `json:"repo"`
++		Number      int    `json:"number"`
++		MaxComments int    `json:"max_comments"`
+ 	}
+ 	if argsJSON != "" {
+ 		_ = json.Unmarshal([]byte(argsJSON), &a)
+@@ -99,7 +108,11 @@
+ 	if a.Number <= 0 {
+ 		return "", fmt.Errorf("issue_read: number is required")
+ 	}
+-	snap := BuildIssueReadContext(ctx, t.GH, a.Number, a.MaxComments)
++	owner, repo, err := parseIssueRepoTarget(a.Repo)
++	if err != nil {
++		return "", fmt.Errorf("issue_read: %w", err)
++	}
++	snap := BuildIssueReadContextForRepo(ctx, t.GH, github.ReadIssueRequest{Owner: owner, Repo: repo, Number: a.Number, MaxComments: a.MaxComments})
+ 	return renderIssueReadContext(snap), nil
+ }
+ 
+@@ -121,11 +134,13 @@
+ // Doesn't return an error itself — every failure shape is captured
+ // in the snapshot so callers can branch on flags.
+ func BuildIssueReadContext(ctx context.Context, client github.Interface, number, maxComments int) IssueReadContext {
+-	snap := IssueReadContext{Number: number}
+-	issue, err := client.ReadIssue(ctx, github.ReadIssueRequest{
+-		Number:      number,
+-		MaxComments: maxComments,
+-	})
++	return BuildIssueReadContextForRepo(ctx, client, github.ReadIssueRequest{Number: number, MaxComments: maxComments})
++}
++
++// BuildIssueReadContextForRepo supports a caller-selected repository without a checkout.
++func BuildIssueReadContextForRepo(ctx context.Context, client github.Interface, req github.ReadIssueRequest) IssueReadContext {
++	snap := IssueReadContext{Number: req.Number}
++	issue, err := client.ReadIssue(ctx, req)
+ 	if errors.Is(err, github.ErrGitHubUnavailable) {
+ 		snap.GitHubUnavailable = true
+ 		return snap
+@@ -212,7 +227,7 @@
+ func (t *GHIssueListTool) Name() string { return "issue_list" }
+ 
+ func (t *GHIssueListTool) Description() string {
+-	return "List open GitHub issues for the current repo, with " +
++	return "List open GitHub issues for the current repo or explicit repo=owner/repo, with " +
+ 		"optional label / assignee / milestone filters (AND-ed). " +
+ 		"Returns lightweight summaries (number, title, author, URL, " +
+ 		"labels, assignees) — bodies and comments are dropped, " +
+@@ -229,6 +244,7 @@
+ 	return map[string]any{
+ 		"type": "object",
+ 		"properties": map[string]any{
++			"repo": map[string]any{"type": "string", "description": "Optional exact owner/repo; no local checkout needed"},
+ 			"labels": map[string]any{
+ 				"type":        "array",
+ 				"items":       map[string]any{"type": "string"},
+@@ -250,12 +266,16 @@
+ 
+ func (t *GHIssueListTool) PreviewCall(argsJSON string) string {
+ 	var a struct {
++		Repo      string   `json:"repo"`
+ 		Labels    []string `json:"labels"`
+ 		Assignee  string   `json:"assignee"`
+ 		Milestone string   `json:"milestone"`
+ 	}
+ 	_ = json.Unmarshal([]byte(argsJSON), &a)
+ 	var parts []string
++	if a.Repo != "" {
++		parts = append(parts, "repo="+a.Repo)
++	}
+ 	if len(a.Labels) > 0 {
+ 		parts = append(parts, "labels="+strings.Join(a.Labels, "+"))
+ 	}
+@@ -276,6 +296,7 @@
+ 		return "", errors.New("issue_list: no GitHub adapter configured")
+ 	}
+ 	var a struct {
++		Repo      string   `json:"repo"`
+ 		Labels    []string `json:"labels"`
+ 		Assignee  string   `json:"assignee"`
+ 		Milestone string   `json:"milestone"`
+@@ -283,7 +304,13 @@
+ 	if argsJSON != "" {
+ 		_ = json.Unmarshal([]byte(argsJSON), &a)
+ 	}
++	owner, repo, err := parseIssueRepoTarget(a.Repo)
++	if err != nil {
++		return "", fmt.Errorf("issue_list: %w", err)
++	}
+ 	snap := BuildIssueListContext(ctx, t.GH, github.ListIssuesRequest{
++		Owner:     owner,
++		Repo:      repo,
+ 		Labels:    a.Labels,
+ 		Assignee:  a.Assignee,
+ 		Milestone: a.Milestone,
+--- /dev/null
++++ b/internal/agent/gh_issue_target.go
+@@ -0,0 +1,30 @@
++package agent
++
++import (
++	"fmt"
++	"regexp"
++	"strings"
++)
++
++// Explicit owner/repo wins over the current working directory.
++var issueOwnerPattern = regexp.MustCompile("^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$")
++var issueRepoPattern = regexp.MustCompile("^[A-Za-z0-9_.-]+$")
++
++func parseIssueRepoTarget(s string) (owner, repo string, err error) {
++	if s == "" {
++		return "", "", nil
++	}
++	parts := strings.Split(s, "/")
++	if len(parts) != 2 || !issueOwnerPattern.MatchString(parts[0]) ||
++		!issueRepoPattern.MatchString(parts[1]) || len(parts[1]) > 100 ||
++		parts[1] == "." || parts[1] == ".." {
++		return "", "", fmt.Errorf("repo must be an exact GitHub owner/repo, without URL, whitespace or paths")
++	}
++	return parts[0], parts[1], nil
++}
++func issueTargetDisplay(s string) string {
++	if s == "" {
++		return "<current repository>"
++	}
++	return s
++}
+--- /dev/null
++++ b/internal/agent/gh_issue_target_test.go
+@@ -0,0 +1,97 @@
++package agent
++
++import (
++	"context"
++	"encoding/json"
++	"strings"
++	"testing"
++
++	"github.com/yottadynamics/yottacode/internal/github"
++)
++
++func TestCrossRepoIssueToolsWithoutCheckout(t *testing.T) {
++	ctx := context.Background()
++	// No CwdRef: the caller supplies the full GitHub identity.
++	gh := &fakeGH{readIssueRes: github.IssueDetails{Number: 7, Title: "Issue from other repo"}}
++	r := &GHIssueReadTool{GH: gh}
++	got, err := r.Execute(ctx, "{\"repo\":\"other/project\",\"number\":7}")
++	if err != nil || !strings.Contains(got, "Issue from other repo") ||
++		gh.readIssueReq.Owner != "other" || gh.readIssueReq.Repo != "project" {
++		t.Fatalf("cross-repo read: %q %v req=%+v", got, err, gh.readIssueReq)
++	}
++	lst := &GHIssueListTool{GH: gh}
++	got, err = lst.Execute(ctx, "{\"repo\":\"team/backend\",\"labels\":[\"bug\"]}")
++	if err != nil || gh.listIssuesReq.Owner != "team" || gh.listIssuesReq.Repo != "backend" ||
++		len(gh.listIssuesReq.Labels) != 1 || gh.listIssuesReq.Labels[0] != "bug" {
++		t.Fatalf("cross-repo list: %q %v req=%+v", got, err, gh.listIssuesReq)
++	}
++	commentGH := &issueCommentProbeGH{}
++	commentTool := &GHIssueAddCommentTool{GH: commentGH}
++	if !commentTool.RequiresApproval("") ||
++		!strings.Contains(commentTool.PreviewCall("{\"repo\":\"team/backend\",\"number\":7,\"body\":\"Verified\"}"), "team/backend") {
++		t.Fatal("comment preview must show repo and require approval")
++	}
++	got, err = commentTool.Execute(ctx, "{\"repo\":\"team/backend\",\"number\":7,\"body\":\"Verified\"}")
++	if err != nil || !strings.Contains(got, "posted=true") ||
++		commentGH.req.Owner != "team" || commentGH.req.Repo != "backend" {
++		t.Fatalf("cross-repo comment: %q %v req=%+v", got, err, commentGH.req)
++	}
++	updateGH := &issueUpdateProbeGH{}
++	updateTool := &GHIssueUpdateTool{GH: updateGH}
++	if !updateTool.RequiresApproval("") ||
++		!strings.Contains(updateTool.PreviewCall("{\"repo\":\"other/project\",\"number\":7,\"title\":\"New title\"}"), "other/project") {
++		t.Fatal("update preview must show repo and require approval")
++	}
++	got, err = updateTool.Execute(ctx, "{\"repo\":\"other/project\",\"number\":7,\"title\":\"New title\"}")
++	if err != nil || !strings.Contains(got, "updated=true") ||
++		updateGH.req.Owner != "other" || updateGH.req.Repo != "project" ||
++		updateGH.req.Title == nil || *updateGH.req.Title != "New title" || updateGH.req.Body != nil {
++		t.Fatalf("cross-repo update: %q %v req=%+v", got, err, updateGH.req)
++	}
++	// A missing repository preserves previous cwd-inference semantics.
++	got, err = updateTool.Execute(ctx, "{\"number\":7,\"body\":\"Local\"}")
++	if err != nil || !strings.Contains(got, "updated=true") ||
++		updateGH.req.Owner != "" || updateGH.req.Repo != "" {
++		t.Fatalf("legacy target changed: %q %v %+v", got, err, updateGH.req)
++	}
++}
++
++func TestCrossRepoRejectsMalformedIdentityBeforeAnyWrite(t *testing.T) {
++	ctx := context.Background()
++	for _, bad := range []string{"team", "team/", "/project", " team/project", "team/project ", "team/project/extra", "https://github.com/team/project", "team/..", "team/.", "team/my project"} {
++		c := &issueCommentProbeGH{}
++		u := &issueUpdateProbeGH{}
++		ct := &GHIssueAddCommentTool{GH: c}
++		ut := &GHIssueUpdateTool{GH: u}
++		// JSON encoder ensures test input cannot accidentally invalidate JSON syntax.
++		inputComment := "{\"repo\":" + mustJSONRepo(bad) + ",\"number\":7,\"body\":\"update\"}"
++		inputUpdate := "{\"repo\":" + mustJSONRepo(bad) + ",\"number\":7,\"title\":\"Updated\"}"
++		out, err := ct.Execute(ctx, inputComment)
++		if err != nil || !strings.Contains(out, "reason=validation") || c.calls != 0 {
++			t.Fatalf("comment bad repo %q: %q %v calls=%d", bad, out, err, c.calls)
++		}
++		out, err = ut.Execute(ctx, inputUpdate)
++		if err != nil || !strings.Contains(out, "reason=validation") || u.calls != 0 {
++			t.Fatalf("update bad repo %q: %q %v calls=%d", bad, out, err, u.calls)
++		}
++	}
++}
++
++func mustJSONRepo(s string) string {
++	b, _ := json.Marshal(s)
++	return string(b)
++}
++
++func TestCrossRepoReadRejectsBadTargetBeforeAdapter(t *testing.T) {
++	readGH := &fakeGH{}
++	r := &GHIssueReadTool{GH: readGH}
++	_, err := r.Execute(context.Background(), "{\"repo\":\"other/project/extra\",\"number\":7}")
++	if err == nil || readGH.readIssueReq.Number != 0 {
++		t.Fatalf("read must fail closed: %v %+v", err, readGH.readIssueReq)
++	}
++	lst := &GHIssueListTool{GH: readGH}
++	_, err = lst.Execute(context.Background(), "{\"repo\":\"other/project/extra\"}")
++	if err == nil || readGH.listIssuesReq.Owner != "" {
++		t.Fatalf("list must fail closed: %v %+v", err, readGH.listIssuesReq)
++	}
++}
+--- /dev/null
++++ b/internal/agent/gh_issue_no_checkout_http_test.go
+@@ -0,0 +1,67 @@
++package agent
++
++import (
++	"context"
++	"io"
++	"net/http"
++	"strings"
++	"testing"
++
++	"github.com/yottadynamics/yottacode/internal/github"
++)
++
++type noCheckoutGitHubHTTP struct{ calls []string }
++
++func (f *noCheckoutGitHubHTTP) RoundTrip(r *http.Request) (*http.Response, error) {
++	f.calls = append(f.calls, r.Method+" "+r.URL.Path)
++	if !strings.HasPrefix(r.URL.Path, "/repos/other/project/issues/7") {
++		return &http.Response{StatusCode: 404, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(strings.NewReader("{}")), Request: r}, nil
++	}
++	status := 200
++	payload := "{\"number\":7,\"title\":\"Original\",\"html_url\":\"https://github.com/other/project/issues/7\"}"
++	if r.Method == "POST" {
++		status = 201
++		payload = "{\"id\":23,\"html_url\":\"https://github.com/other/project/issues/7#issuecomment-23\"}"
++	}
++	return &http.Response{StatusCode: status, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(strings.NewReader(payload)), Request: r}, nil
++}
++
++func TestCrossRepoFullAgentHTTPWithoutGitCheckout(t *testing.T) {
++	t.Setenv("GITHUB_TOKEN", "test-token-only")
++	recorder := &noCheckoutGitHubHTTP{}
++	// t.TempDir is deliberately NOT a Git checkout. No live GitHub calls.
++	client := &github.TypedClient{Cwd: t.TempDir(), HTTPClient: &http.Client{Transport: recorder}}
++	update := &GHIssueUpdateTool{GH: client}
++	comment := &GHIssueAddCommentTool{GH: client}
++	ctx := context.Background()
++
++	// Legacy mode cannot select a remote repo when cwd has no Git identity.
++	old, err := update.Execute(ctx, "{\"number\":7,\"title\":\"Updated\"}")
++	if err != nil || !strings.Contains(old, "updated=false") || len(recorder.calls) != 0 {
++		t.Fatalf("no-checkout baseline must not write: %q %v calls=%v", old, err, recorder.calls)
++	}
++	// With the same client and the same working directory, the new repo
++	// argument routes both operations to the explicit remote target.
++	out, err := update.Execute(ctx, "{\"repo\":\"other/project\",\"number\":7,\"title\":\"Updated\"}")
++	if err != nil || !strings.Contains(out, "updated=true") {
++		t.Fatalf("explicit update: %q %v", out, err)
++	}
++	out, err = comment.Execute(ctx, "{\"repo\":\"other/project\",\"number\":7,\"body\":\"Verified\"}")
++	if err != nil || !strings.Contains(out, "posted=true") {
++		t.Fatalf("explicit comment: %q %v", out, err)
++	}
++	expected := []string{
++		"GET /repos/other/project/issues/7",
++		"PATCH /repos/other/project/issues/7",
++		"GET /repos/other/project/issues/7",
++		"POST /repos/other/project/issues/7/comments",
++	}
++	if len(recorder.calls) != len(expected) {
++		t.Fatalf("calls=%v", recorder.calls)
++	}
++	for i, x := range expected {
++		if recorder.calls[i] != x {
++			t.Fatalf("call %d=%q expected %q", i, recorder.calls[i], x)
++		}
++	}
++}
